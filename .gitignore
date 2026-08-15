@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+sample_10pct_frames/
+sample_10pct_frames_timestamped/
+*.mp4
+*.avi
+auto_params*.json

@@ -20,17 +20,31 @@ import glob
 import json
 import math
 import os
+import re
+import time
 
 import cv2
 import numpy as np
 
 
-IMG_EXTS = (".jpg", ".jpeg", ".png", ".bmp")
+# 支持的图像格式(OpenCV imread 可读)
+IMG_EXTS = (".jpg", ".jpeg", ".jpe", ".png", ".bmp", ".dib",
+            ".tif", ".tiff", ".webp", ".ppm", ".pgm", ".pbm", ".pnm",
+            ".jp2", ".ras", ".sr")
+
+
+def natural_key(name):
+    """自然排序键:让 frame2 < frame10(非零填充命名也能正确排序)。"""
+    return [int(t) if t.isdigit() else t.lower()
+            for t in re.split(r"(\d+)", name)]
+
 
 DEFAULT_PARAMS = {
     # 检测
     "method": "auto", "sat_thresh": 60,
+    "thresh_lo": 50, "thresh_hi": 205,
     "min_area": 300, "max_area": 0, "max_aspect": 0.0,
+    "min_area_frac": 0.0, "max_area_frac": 0.0,
     "morph_kernel": 7, "morph_iter": 2,
     "bg_history": 200, "bg_var": 40.0,
     "ref_thresh": 25, "bg_ref": None, "ref_alpha": 0.0,
@@ -44,7 +58,9 @@ DEFAULT_PARAMS = {
 }
 
 # 供调参器区分"检测参数"与"跟踪参数"(检测结果可跨跟踪组合复用)
-DET_KEYS = {"method", "sat_thresh", "min_area", "max_area", "max_aspect",
+DET_KEYS = {"method", "sat_thresh", "thresh_lo", "thresh_hi",
+            "min_area", "max_area", "max_aspect",
+            "min_area_frac", "max_area_frac",
             "morph_kernel", "morph_iter", "bg_history", "bg_var", "ref_thresh",
             "bg_ref", "ref_alpha", "split_area", "unit_area", "merge_dist",
             "roi", "scale"}
@@ -60,11 +76,15 @@ class FrameSource:
         self.is_dir = os.path.isdir(path)
         if self.is_dir:
             self.files = sorted(
-                os.path.join(path, f) for f in os.listdir(path)
-                if f.lower().endswith(IMG_EXTS))
+                (os.path.join(path, f) for f in os.listdir(path)
+                 if f.lower().endswith(IMG_EXTS)),
+                key=lambda p: natural_key(os.path.basename(p)))
             if not self.files:
-                raise RuntimeError(f"文件夹中没有图片: {path}")
+                raise RuntimeError(
+                    f"文件夹中没有支持的图片({'/'.join(IMG_EXTS)}): {path}")
             first = cv2.imread(self.files[0])
+            if first is None:
+                raise RuntimeError(f"无法读取图片: {self.files[0]}")
             self.h, self.w = first.shape[:2]
             self.n = len(self.files)
             self.fps = fps
@@ -178,16 +198,33 @@ class Detector:
         self.ref = ref_gray.copy() if ref_gray is not None else None
         self.axis = P["axis"]
         self.roi = parse_roi(P["roi"], w, h)
+        # ROI 先裁后算:参考帧同步裁到 ROI，前景/形态学只在小区域跑
+        if self.roi is not None and self.ref is not None:
+            x0, y0, x1, y1 = self.roi
+            self.ref = self.ref[y0:y1, x0:x1].copy()
+        # 面积阈值:优先用"占画面比例"(分辨率/缩放无关),否则用绝对像素
+        area = w * h
+        self.min_area = (P["min_area_frac"] * area
+                         if P.get("min_area_frac", 0) > 0 else P["min_area"])
+        self.max_area = (P["max_area_frac"] * area
+                         if P.get("max_area_frac", 0) > 0 else P["max_area"])
         self.bg = (cv2.createBackgroundSubtractorMOG2(
             history=P["bg_history"], varThreshold=P["bg_var"],
             detectShadows=False) if method == "bgsub" else None)
         k = int(P["morph_kernel"]) | 1
-        self.kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+        # 矩形核:OpenCV 可分离优化,比椭圆快约 3 倍,去噪/补洞效果基本一致
+        self.kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k, k))
 
     def _foreground(self, frame):
         if self.method == "color":
             hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
             return cv2.inRange(hsv[:, :, 1], self.P["sat_thresh"], 255)
+        if self.method == "thresh":
+            # 强度阈值:物体亮度在背景带 [lo,hi] 之外(过暗或过亮)。
+            # 无状态,不建模,天然免疫任意纹理运动(只要物体亮度可区分)。
+            g = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            lo, hi = self.P["thresh_lo"], self.P["thresh_hi"]
+            return ((g < lo) | (g > hi)).astype(np.uint8) * 255
         if self.method == "refbg":
             g = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.int16)
             fg = (np.abs(g - self.ref) > self.P["ref_thresh"]).astype(np.uint8) * 255
@@ -226,13 +263,11 @@ class Detector:
         return merged
 
     def detect(self, frame):
+        ox, oy = 0, 0
+        if self.roi is not None:   # 先裁到 ROI,重活只在小区域跑
+            ox, oy, x1, y1 = self.roi
+            frame = frame[oy:y1, ox:x1]
         fg = self._foreground(frame)
-        if self.roi is not None:   # 置零 ROI 之外(免每帧分配掩膜)
-            x0, y0, x1, y1 = self.roi
-            fg[:y0] = 0
-            fg[y1:] = 0
-            fg[:, :x0] = 0
-            fg[:, x1:] = 0
         fg = cv2.morphologyEx(fg, cv2.MORPH_OPEN, self.kernel)
         fg = cv2.morphologyEx(fg, cv2.MORPH_CLOSE, self.kernel,
                               iterations=int(self.P["morph_iter"]))
@@ -243,11 +278,13 @@ class Detector:
         dets = []
         for c in cnts:
             area = cv2.contourArea(c)
-            if area < self.P["min_area"]:
+            if area < self.min_area:
                 continue
-            if self.P["max_area"] and area > self.P["max_area"]:
+            if self.max_area and area > self.max_area:
                 continue
             x, y, bw, bh = cv2.boundingRect(c)
+            x += ox   # 偏移回全图坐标
+            y += oy
             if max_aspect > 0:   # 滤掉细长噪声条纹
                 aspect = max(bw, bh) / max(min(bw, bh), 1)
                 if aspect > max_aspect:
@@ -290,15 +327,26 @@ class Tracker:
         for t in self.tracks:
             t.matched = False
 
-        # 全局最短距离贪心匹配(顺序无关，优于按检测顺序的贪心)：
-        # 收集所有(距离<max_dist)的候选对，按距离升序依次占用。
+        # 全局最短距离贪心匹配(顺序无关)。用空间网格分桶把候选对从
+        # O(轨迹×检测) 降到 ~O(N):格边长=max_dist,则任意 <max_dist 的
+        # 轨迹-检测对必在同格或相邻 8 格,结果与全量枚举完全一致。
+        md = P["max_dist"]
+        cell = md if md > 0 else 1.0
+        grid = {}
+        for t in self.tracks:
+            px, py = t.cx + t.vx, t.cy + t.vy   # 预测位置
+            grid.setdefault((int(px // cell), int(py // cell)), []).append(
+                (t, px, py))
         pairs = []
         for di, d in enumerate(dets):
             cx, cy = d[0], d[1]
-            for t in self.tracks:
-                dist = math.hypot(t.cx + t.vx - cx, t.cy + t.vy - cy)
-                if dist < P["max_dist"]:
-                    pairs.append((dist, di, t))
+            kx, ky = int(cx // cell), int(cy // cell)
+            for ax in (kx - 1, kx, kx + 1):
+                for ay in (ky - 1, ky, ky + 1):
+                    for t, px, py in grid.get((ax, ay), ()):
+                        dist = math.hypot(px - cx, py - cy)
+                        if dist < md:
+                            pairs.append((dist, di, t))
         pairs.sort(key=lambda z: z[0])
         det_used = [False] * len(dets)
         for dist, di, t in pairs:
@@ -399,9 +447,15 @@ def track_sequence(dets_seq, P, w, h, method):
     return trk.count
 
 
-def count_source(source, params=None, fps=30.0, save=None, show=False,
-                 debug=False, verbose=False):
-    """对一个视频/图片文件夹计数，返回越线总数(单遍处理，可视化)。"""
+def count_source(source, params=None, fps=30.0, save=None, save_fps=None,
+                 save_frames=None, show=False, debug=False, verbose=False,
+                 profile=False):
+    """对一个视频/图片文件夹计数，返回越线总数(单遍处理，可视化)。
+
+    save_fps: 指定标注视频的播放帧率(不丢帧;低于源帧率=慢放,方便高帧率视频回看)。
+    save_frames: 目录路径;把标注帧另存为图片序列(契合图片文件夹工作流)。
+    profile: 逐帧打印处理耗时(仅检测+跟踪,不含读帧),结尾给实时性统计。
+    """
     P = {**DEFAULT_PARAMS, **(params or {})}
     src = FrameSource(source, fps)
     scale = P["scale"]
@@ -424,20 +478,29 @@ def count_source(source, params=None, fps=30.0, save=None, show=False,
     writer = None
     if save:
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        writer = cv2.VideoWriter(save, fourcc, src.fps, (w, h))
+        out_fps = save_fps if save_fps else src.fps
+        writer = cv2.VideoWriter(save, fourcc, out_fps, (w, h))
+    if save_frames:
+        os.makedirs(save_frames, exist_ok=True)
 
     idx = -1
+    proc_ms = [] if profile else None
     for frame in src.frames():
         idx += 1
         frame = scaled(frame, scale, w, h)
+        t0 = time.perf_counter() if profile else 0.0
         dets = det.detect(frame)
         warming = is_warming(method, idx, P["warmup"])
         prev = trk.count
         trk.update(dets, warming)
+        if profile:
+            dt = (time.perf_counter() - t0) * 1000.0   # 仅检测+跟踪耗时
+            proc_ms.append(dt)
+            print(f"[profile] frame {idx}: {dt:.2f} ms")
         if debug and trk.count > prev:
             print(f"[count {trk.count}] frame={idx}")
 
-        if show or writer:
+        if show or writer or save_frames:
             vis = frame.copy()
             if trk.axis == "x":
                 cv2.line(vis, (trk.line_pos, 0), (trk.line_pos, h), (0, 0, 255), 2)
@@ -447,10 +510,19 @@ def count_source(source, params=None, fps=30.0, save=None, show=False,
                 _, _, x, y, bw, bh = d
                 cv2.rectangle(vis, (int(x), int(y)), (int(x + bw), int(y + bh)),
                               (0, 255, 0), 2)
+            # 轨迹 ID + 已计数高亮(便于人工核对)
+            for t in trk.tracks:
+                c = (int(t.cx), int(t.cy))
+                if t.counted:
+                    cv2.circle(vis, c, 6, (0, 255, 255), -1)   # 黄点=已计过
+                cv2.putText(vis, str(t.id), (c[0] + 6, c[1] - 6),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
             cv2.putText(vis, f"count: {trk.count}", (20, 40),
                         cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 255), 2)
             if writer:
                 writer.write(vis)
+            if save_frames:
+                cv2.imwrite(os.path.join(save_frames, f"frame_{idx:06d}.jpg"), vis)
             if show:
                 cv2.imshow("count", vis)
                 if cv2.waitKey(1) == 27:
@@ -461,6 +533,20 @@ def count_source(source, params=None, fps=30.0, save=None, show=False,
         writer.release()
     if show:
         cv2.destroyAllWindows()
+
+    if profile and proc_ms:
+        a = np.array(proc_ms)
+        print(f"[profile] 帧数={len(a)} 平均={a.mean():.2f}ms 中位={np.median(a):.2f}ms "
+              f"p95={np.percentile(a, 95):.2f}ms 最大={a.max():.2f}ms")
+        eff = 1000.0 / a.mean() if a.mean() > 0 else float("inf")
+        line = f"[profile] 处理吞吐≈{eff:.0f} fps"
+        if src.fps:
+            budget = 1000.0 / src.fps
+            ok = np.percentile(a, 95) <= budget
+            line += (f" | 源{src.fps:.0f}fps 每帧预算{budget:.2f}ms -> "
+                     f"{'满足实时✅' if ok else '达不到实时(p95超预算)⚠️'}")
+        print(line)
+
     return trk.count
 
 
@@ -484,11 +570,19 @@ def build_arg_parser():
     p.add_argument("source", help="视频文件 或 图片文件夹")
     p.add_argument("--fps", type=float, default=30.0, help="图片文件夹帧率(仅影响保存)")
     # 检测
-    p.add_argument("--method", choices=["auto", "color", "bgsub", "refbg"],
+    p.add_argument("--method", choices=["auto", "color", "bgsub", "refbg", "thresh"],
                    default="auto", help="前景分离方式")
     p.add_argument("--sat-thresh", type=int, default=60, help="color模式饱和度阈值")
-    p.add_argument("--min-area", type=int, default=300, help="轮廓最小面积")
-    p.add_argument("--max-area", type=int, default=0, help="轮廓最大面积(0=不限)")
+    p.add_argument("--thresh-lo", type=int, default=50,
+                   help="thresh模式:暗于此灰度=前景(背景带下界)")
+    p.add_argument("--thresh-hi", type=int, default=205,
+                   help="thresh模式:亮于此灰度=前景(背景带上界)")
+    p.add_argument("--min-area", type=int, default=300, help="轮廓最小面积(像素)")
+    p.add_argument("--max-area", type=int, default=0, help="轮廓最大面积(像素,0=不限)")
+    p.add_argument("--min-area-frac", type=float, default=0.0,
+                   help="最小面积占画面比例(0~1,优先于像素;分辨率/缩放无关)")
+    p.add_argument("--max-area-frac", type=float, default=0.0,
+                   help="最大面积占画面比例(0~1,优先于像素;0=不限)")
     p.add_argument("--max-aspect", type=float, default=0.0,
                    help="最大长宽比(0=不限;滤除细长噪声条纹)")
     p.add_argument("--morph-kernel", type=int, default=7, help="形态学核大小(奇数)")
@@ -519,8 +613,14 @@ def build_arg_parser():
     # 输出
     p.add_argument("--show", action="store_true", help="实时显示")
     p.add_argument("--save", default=None, help="保存可视化视频")
+    p.add_argument("--save-fps", type=float, default=None,
+                   help="标注视频播放帧率(不丢帧;低于源帧率=慢放,便于高帧率回看)")
+    p.add_argument("--save-frames", default=None,
+                   help="把标注帧另存为图片序列到该目录(图片文件夹工作流)")
     p.add_argument("--meta", default=None, help="计数真值json(默认自动查找)")
     p.add_argument("--debug", action="store_true", help="打印计数事件")
+    p.add_argument("--profile", action="store_true",
+                   help="逐帧打印处理耗时(仅检测+跟踪,不含读帧)+实时性统计")
     return p
 
 
@@ -532,7 +632,9 @@ def main():
     args = build_arg_parser().parse_args()
     params = args_to_params(args)
     count = count_source(args.source, params, fps=args.fps, save=args.save,
-                         show=args.show, debug=args.debug, verbose=True)
+                         save_fps=args.save_fps, save_frames=args.save_frames,
+                         show=args.show, debug=args.debug, verbose=True,
+                         profile=args.profile)
     print(f"CV 计数结果: {count}")
     gt = find_gt(args.source, args.meta)
     if gt is not None:

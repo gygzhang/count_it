@@ -11,7 +11,7 @@
 - [核心概念](#核心概念)
 - [脚本 1:gen_shapes_video.py 合成数据](#脚本-1gen_shapes_videopy--合成数据生成)
 - [脚本 2:video_to_frames.py 抽帧](#脚本-2video_to_framespy--视频转图片)
-- [脚本 3:count_cv.py 计数引擎](#脚本-3count_cvpy--计数引擎)
+- [脚本 3:count_cv.py 命令行入口](#脚本-3count_cvpy--命令行入口)
 - [脚本 4:tune_params.py 自动调参](#脚本-4tune_paramspy--自动调参)
 - [调参速查表(症状→调哪个)](#调参速查表症状调哪个参数)
 - [输入要求与假设](#输入要求与假设)
@@ -22,10 +22,17 @@
 
 ## 安装
 
-```
+运行时安装:
+```bash
 pip install -r requirements.txt
 ```
 仅需 `opencv-python` + `numpy`,无需 GPU、无需训练权重。
+
+参与开发时安装开发依赖并运行完整验证:
+```bash
+pip install -r requirements-dev.txt
+pytest -q
+```
 
 ---
 
@@ -40,7 +47,13 @@ pip install -r requirements.txt
         [tune_params] → best_params.json  (用带真值样例搜出)
 ```
 
-**count_cv 两阶段**(每帧)
+**模块职责(均为仓库根目录的扁平模块)**
+- `sources.py`:输入源读取、帧解码与缩放。
+- `params.py`:默认参数 `DEFAULT_PARAMS`、JSON 参数加载与参数校验/合并。
+- `counting.py`:检测器 `Detector`、跟踪器 `Tracker` 与可复用入口 `count_source`。
+- `count_cv.py`:只负责命令行解析、参数装配、调用 `count_source`,以及计数结果/真值/误差报告;核心功能应从上述模块导入,而不是从 `count_cv` 导入。
+
+**检测/跟踪两阶段**(每帧)
 ```
 检测 Detector: 前景分离 → 形态学去噪 → 轮廓 → 面积/形状过滤 → 粘连分割/碎裂合并 → 检测点
 跟踪 Tracker:  全局最短距离匹配(速度预测) → 轨迹确认/方向门控 → 越线(可迟滞)计数
@@ -116,9 +129,9 @@ python3 video_to_frames.py belt.mp4 frames_belt --ext jpg
 
 ---
 
-## 脚本 3:count_cv.py — 计数引擎
+## 脚本 3:count_cv.py — 命令行入口
 
-输入可是**视频文件**或**图片文件夹**;灰度/彩色**自动识别**。
+`count_cv.py` 是计数功能的 CLI 入口,输入可以是**视频文件**或**图片文件夹**;灰度/彩色**自动识别**。
 
 **支持的输入格式**
 - **视频**:走 OpenCV 解码,支持 mp4/avi/mov/mkv/webm/m4v/flv 等常见格式(取决于系统 ffmpeg)。
@@ -128,7 +141,16 @@ python3 video_to_frames.py belt.mp4 frames_belt --ext jpg
 python3 count_cv.py <视频或文件夹> --save out.mp4                  # 最简
 python3 count_cv.py frames_belt --method refbg --roi 0,200,1280,520 \
     --min-area 200 --max-dist 180 --save out.mp4 --save-fps 20
+
+# 读取调参结果
+python3 count_cv.py clip.mp4 --params best_params.json
+
+# 显式命令行参数覆盖 JSON 中的同名值
+python3 count_cv.py clip.mp4 --params best_params.json --min-area 180
 ```
+
+参数优先级从低到高为:`DEFAULT_PARAMS` < `--params` 指定的 JSON < 显式命令行参数。只有实际写在命令行上的参数才会覆盖 JSON;未显式指定的参数继续采用 JSON 或默认值。
+
 
 ### 前景分离参数
 | 参数 | 默认 | 说明 / 何时调 |
@@ -163,7 +185,7 @@ python3 count_cv.py frames_belt --method refbg --roi 0,200,1280,520 \
 |------|------|--------------|
 | `--max-dist` | 140 | 预测位置与检测的最大匹配距离;**高速必须 ≥ 每帧位移**(=速度/帧率) |
 | `--track-ttl` | 5 | 轨迹漏检后存活帧数;短暂遮挡/闪断→调大 |
-| `--min-hits` | 1 | 轨迹**连续确认 N 帧才允许计数**;噪声闪现误计→调到 2~3 |
+| `--min-hits` | 1 | 轨迹须**连续观测 N 帧**才允许计数;任一漏检间隙会重新开始连续确认,但 `track-ttl` 仍可保留该轨迹及其运动历史。噪声闪现误计→调到 2~3 |
 | `--min-speed` | 0(关) | 计数所需最小轴向速度(px/帧);排除静止噪声 |
 | `--line` | 0.5 | 计数线位置(画面比例,沿计数轴) |
 | `--line-band` | 0 | 迟滞带宽(画面比例);物体在线附近抖动重复计→设 0.03~0.05 |
@@ -203,6 +225,7 @@ python3 count_cv.py frames_belt --method refbg --roi 0,200,1280,520 \
 python3 tune_params.py samples.txt --axis x --flow both --scale 0.5 --jobs 4
 python3 tune_params.py samples.txt --val val.txt \
     --grid '{"min_area":[60,120,200],"bg_var":[15,30,50],"max_dist":[120,180]}'
+python3 tune_params.py samples.txt --method thresh --scale 0.5
 ```
 
 ### 清单格式
@@ -219,11 +242,13 @@ clip_c.mp4           # 留空 → 自动读 clip_c_meta.json 的 crossed_center_
 | `manifest` | — | 样例清单(位置参数,必需) |
 | `--val` | 无 | 验证集清单(同格式,不参与搜索,只评泛化) |
 | `--grid` | 内置 | 自定义网格 json,如 `'{"min_area":[100,200],"bg_var":[30,50]}'` |
-| `--axis` `--flow` `--method` `--line` `--scale` `--roi` | 用默认 | **固定场景参数**(不搜索),设成你现场实际值 |
+| `--axis` `--flow` `--method` `--line` `--scale` `--roi` | 用默认 | **固定场景参数**(不搜索),设成现场实际值;`--method thresh` 受支持 |
 | `--jobs` | 1 | 并行进程数(按样例) |
 | `--mem-mb` | 2000 | 每段帧缓存内存上限;超出自动逐帧重读(内存安全) |
 | `--topk` | 10 | 展示前 K 组 |
 | `--out` | best_params.json | 最佳参数输出 |
+
+> 缓存模型要求影响帧准备/检测缓存含义的参数在一次搜索中保持固定。自定义 `--grid` 因此会拒绝 `method`、`scale`、`bg_ref`、`axis`;其中可用的命令行选项应作为上表所列固定参数传入,而不是放进网格。
 
 ### 打分与选参
 - **SAE** = 所有样例绝对误差之和(越小越好)。

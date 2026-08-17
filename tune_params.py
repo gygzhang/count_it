@@ -23,9 +23,9 @@ import json
 import os
 from concurrent.futures import ProcessPoolExecutor
 
-from count_cv import (DEFAULT_PARAMS, DET_KEYS, TRK_KEYS, FrameSource,
-                      decode_all, resolve_method, detect_sequence,
+from count_cv import (FrameSource, decode_all, resolve_method, detect_sequence,
                       track_sequence, count_source, find_gt, scaled)
+from params import DEFAULT_PARAMS, DETECTION_KEYS, TRACKING_KEYS
 import cv2
 
 
@@ -102,8 +102,8 @@ def eval_sample(task):
     method, ref = resolve_method(base, cache.samples(), w, h)
 
     keys = list(grid.keys())
-    det_keys = [k for k in keys if k in DET_KEYS]
-    trk_keys = [k for k in keys if k in TRK_KEYS]
+    det_keys = [k for k in keys if k in DETECTION_KEYS]
+    trk_keys = [k for k in keys if k in TRACKING_KEYS]
 
     results = {}
     for det_vals in itertools.product(*[grid[k] for k in det_keys]):

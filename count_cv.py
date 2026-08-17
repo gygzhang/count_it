@@ -26,6 +26,7 @@ import time
 import cv2
 import numpy as np
 
+from params import DEFAULT_PARAMS, parse_roi
 
 # 支持的图像格式(OpenCV imread 可读)
 IMG_EXTS = (".jpg", ".jpeg", ".jpe", ".png", ".bmp", ".dib",
@@ -37,35 +38,6 @@ def natural_key(name):
     """自然排序键:让 frame2 < frame10(非零填充命名也能正确排序)。"""
     return [int(t) if t.isdigit() else t.lower()
             for t in re.split(r"(\d+)", name)]
-
-
-DEFAULT_PARAMS = {
-    # 检测
-    "method": "auto", "sat_thresh": 60,
-    "thresh_lo": 50, "thresh_hi": 205,
-    "min_area": 300, "max_area": 0, "max_aspect": 0.0,
-    "min_area_frac": 0.0, "max_area_frac": 0.0,
-    "morph_kernel": 7, "morph_iter": 2,
-    "bg_history": 200, "bg_var": 40.0,
-    "ref_thresh": 25, "bg_ref": None, "ref_alpha": 0.0,
-    "split_area": 0, "unit_area": 0, "merge_dist": 0.0,
-    "roi": None, "scale": 1.0,
-    # 跟踪/计数
-    "max_dist": 140.0, "track_ttl": 5,
-    "min_hits": 1, "min_speed": 0.0,
-    "line": 0.5, "line_band": 0.0,
-    "axis": "x", "flow": "both", "warmup": 8,
-}
-
-# 供调参器区分"检测参数"与"跟踪参数"(检测结果可跨跟踪组合复用)
-DET_KEYS = {"method", "sat_thresh", "thresh_lo", "thresh_hi",
-            "min_area", "max_area", "max_aspect",
-            "min_area_frac", "max_area_frac",
-            "morph_kernel", "morph_iter", "bg_history", "bg_var", "ref_thresh",
-            "bg_ref", "ref_alpha", "split_area", "unit_area", "merge_dist",
-            "roi", "scale"}
-TRK_KEYS = {"max_dist", "track_ttl", "min_hits", "min_speed", "line",
-            "line_band", "axis", "flow", "warmup"}
 
 
 class FrameSource:
@@ -138,14 +110,6 @@ class Track:
         self.missing = 0
         self.counted = False
         self.matched = False
-
-
-def parse_roi(roi, w, h):
-    if roi is None:
-        return None
-    if isinstance(roi, str):
-        roi = [int(v) for v in roi.split(",")]
-    return (max(0, roi[0]), max(0, roi[1]), min(w, roi[2]), min(h, roi[3]))
 
 
 def choose_method_frames(frames):

@@ -49,6 +49,8 @@ def load_or_make_ref(P, sample_frames, w, h):
     ref_path = P.get("bg_ref")
     if ref_path and ref_path != "auto" and os.path.exists(ref_path):
         img = cv2.imread(ref_path)
+        if img is None:
+            raise RuntimeError(f"unable to read reference image: {ref_path}")
         if (img.shape[1], img.shape[0]) != (w, h):
             img = cv2.resize(img, (w, h))
         return cv2.cvtColor(img, cv2.COLOR_BGR2GRAY).astype(np.int16)

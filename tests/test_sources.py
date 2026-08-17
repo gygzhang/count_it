@@ -91,3 +91,48 @@ def test_count_source_releases_outputs_on_late_read_error(tmp_path, monkeypatch)
     assert released["source"]
     assert writer.released
     assert destroyed == [True]
+
+
+def test_video_source_rejects_failed_read_before_reported_count(tmp_path, monkeypatch):
+    path = tmp_path / "broken.mp4"
+
+    class FakeCapture:
+        def __init__(self, _path):
+            self.index = 0
+
+        def isOpened(self):
+            return True
+
+        def get(self, property_id):
+            values = {
+                cv2.CAP_PROP_FRAME_WIDTH: 12,
+                cv2.CAP_PROP_FRAME_HEIGHT: 8,
+                cv2.CAP_PROP_FPS: 30,
+                cv2.CAP_PROP_FRAME_COUNT: 3,
+            }
+            return values.get(property_id, 0)
+
+        def set(self, property_id, value):
+            assert property_id == cv2.CAP_PROP_POS_FRAMES
+            self.index = int(value)
+
+        def read(self):
+            if self.index == 0:
+                self.index += 1
+                return True, np.zeros((8, 12, 3), dtype=np.uint8)
+            self.index += 1
+            return False, None
+
+        def release(self):
+            pass
+
+    monkeypatch.setattr(cv2, "VideoCapture", FakeCapture)
+    source = FrameSource(str(path))
+    frames = source.frames()
+    assert next(frames).shape == (8, 12, 3)
+    with pytest.raises(RuntimeError, match=r"broken\.mp4"):
+        next(frames)
+
+    source = FrameSource(str(path))
+    with pytest.raises(RuntimeError, match=r"broken\.mp4"):
+        source.sample(1)

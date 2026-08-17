@@ -59,9 +59,15 @@ class FrameSource:
     def sample(self, i):
         if self.is_dir:
             return self._read_image(self.files[min(i, self.n - 1)])
-        self.cap.set(cv2.CAP_PROP_POS_FRAMES, int(i))
+        index = int(i)
+        self.cap.set(cv2.CAP_PROP_POS_FRAMES, index)
         ret, frame = self.cap.read()
-        return frame if ret else None
+        if ret:
+            return frame
+        if self.n > 0 and 0 <= index < self.n:
+            raise RuntimeError(
+                f"unable to read frame {index} from video: {self.path}")
+        return None
 
     def frames(self):
         if self.is_dir:
@@ -69,11 +75,20 @@ class FrameSource:
                 yield self._read_image(path)
         else:
             self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-            while True:
-                ret, frame = self.cap.read()
-                if not ret:
-                    break
-                yield frame
+            if self.n > 0:
+                for index in range(self.n):
+                    ret, frame = self.cap.read()
+                    if not ret:
+                        raise RuntimeError(
+                            f"unable to read frame {index} from video: {self.path}")
+                    yield frame
+            else:
+                while True:
+                    ret, frame = self.cap.read()
+                    if not ret:
+                        break
+                    yield frame
+
 
     def release(self):
         if not self.is_dir:

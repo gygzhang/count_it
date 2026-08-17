@@ -21,7 +21,6 @@ def timestamp_name(frame_index, fps):
     seconds, milliseconds = divmod(milliseconds, 1_000)
     return f"{hours:02d}-{minutes:02d}-{seconds:02d}.{milliseconds:03d}"
 
-
 def main():
     p = argparse.ArgumentParser(description="视频抽帧成图片文件夹")
     p.add_argument("video", help="输入视频")

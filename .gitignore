@@ -2,6 +2,17 @@ __pycache__/
 *.pyc
 sample_10pct_frames/
 sample_10pct_frames_timestamped/
+sample_3318_frames/
+*_contact.jpg
 *.mp4
 *.avi
 auto_params*.json
+
+# 测试产物(合成视频 / 真值 / 抽帧 / 标注 / 调参输出),不入库
+*_meta.json
+frames_*/
+labels/
+best_params.json
+samples.txt
+hard_samples.txt
+val_samples.txt

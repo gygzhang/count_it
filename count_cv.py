@@ -20,79 +20,16 @@ import glob
 import json
 import math
 import os
-import re
 import time
 
 import cv2
 import numpy as np
 
 from params import DEFAULT_PARAMS, parse_roi
-
-# 支持的图像格式(OpenCV imread 可读)
-IMG_EXTS = (".jpg", ".jpeg", ".jpe", ".png", ".bmp", ".dib",
-            ".tif", ".tiff", ".webp", ".ppm", ".pgm", ".pbm", ".pnm",
-            ".jp2", ".ras", ".sr")
+from sources import FrameSource, scaled
 
 
-def natural_key(name):
-    """自然排序键:让 frame2 < frame10(非零填充命名也能正确排序)。"""
-    return [int(t) if t.isdigit() else t.lower()
-            for t in re.split(r"(\d+)", name)]
 
-
-class FrameSource:
-    """统一封装：视频文件 或 图片文件夹，按顺序产出帧。"""
-
-    def __init__(self, path, fps=30.0):
-        self.path = path
-        self.is_dir = os.path.isdir(path)
-        if self.is_dir:
-            self.files = sorted(
-                (os.path.join(path, f) for f in os.listdir(path)
-                 if f.lower().endswith(IMG_EXTS)),
-                key=lambda p: natural_key(os.path.basename(p)))
-            if not self.files:
-                raise RuntimeError(
-                    f"文件夹中没有支持的图片({'/'.join(IMG_EXTS)}): {path}")
-            first = cv2.imread(self.files[0])
-            if first is None:
-                raise RuntimeError(f"无法读取图片: {self.files[0]}")
-            self.h, self.w = first.shape[:2]
-            self.n = len(self.files)
-            self.fps = fps
-        else:
-            self.cap = cv2.VideoCapture(path)
-            if not self.cap.isOpened():
-                raise RuntimeError(f"无法打开: {path}")
-            self.w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            self.h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            self.fps = self.cap.get(cv2.CAP_PROP_FPS) or fps
-            self.n = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
-
-    def sample(self, i):
-        if self.is_dir:
-            return cv2.imread(self.files[min(i, self.n - 1)])
-        self.cap.set(cv2.CAP_PROP_POS_FRAMES, int(i))
-        ret, f = self.cap.read()
-        return f if ret else None
-
-    def frames(self):
-        if self.is_dir:
-            for f in self.files:
-                img = cv2.imread(f)
-                if img is not None:
-                    yield img
-        else:
-            self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-            while True:
-                ret, f = self.cap.read()
-                if not ret:
-                    break
-                yield f
-
-    def release(self):
-        if not self.is_dir:
-            self.cap.release()
 
 
 class Track:
@@ -373,23 +310,12 @@ class Tracker:
 
 # ---- 供调参器复用的分阶段接口 ----
 
-def scaled(frame, scale, w, h):
-    """按需缩放一帧(scale==1 时原样返回)。"""
-    return frame if scale == 1.0 else cv2.resize(frame, (w, h))
-
 
 def is_warming(method, idx, warmup):
     """bgsub 前若干帧只建模不计数。"""
     return method == "bgsub" and idx < warmup
 
 
-def decode_all(source, scale=1.0, fps=30.0):
-    """解码为内存帧列表(可缩放)。返回 (frames, w, h)。"""
-    src = FrameSource(source, fps)
-    w, h = int(src.w * scale), int(src.h * scale)
-    frames = [scaled(f, scale, w, h) for f in src.frames()]
-    src.release()
-    return frames, w, h
 
 
 def resolve_method(P, frames, w=None, h=None):
@@ -449,54 +375,56 @@ def count_source(source, params=None, fps=30.0, save=None, save_fps=None,
 
     idx = -1
     proc_ms = [] if profile else None
-    for frame in src.frames():
-        idx += 1
-        frame = scaled(frame, scale, w, h)
-        t0 = time.perf_counter() if profile else 0.0
-        dets = det.detect(frame)
-        warming = is_warming(method, idx, P["warmup"])
-        prev = trk.count
-        trk.update(dets, warming)
-        if profile:
-            dt = (time.perf_counter() - t0) * 1000.0   # 仅检测+跟踪耗时
-            proc_ms.append(dt)
-            print(f"[profile] frame {idx}: {dt:.2f} ms")
-        if debug and trk.count > prev:
-            print(f"[count {trk.count}] frame={idx}")
+    try:
+        for frame in src.frames():
+            idx += 1
+            frame = scaled(frame, scale, w, h)
+            t0 = time.perf_counter() if profile else 0.0
+            dets = det.detect(frame)
+            warming = is_warming(method, idx, P["warmup"])
+            prev = trk.count
+            trk.update(dets, warming)
+            if profile:
+                dt = (time.perf_counter() - t0) * 1000.0   # 仅检测+跟踪耗时
+                proc_ms.append(dt)
+                print(f"[profile] frame {idx}: {dt:.2f} ms")
+            if debug and trk.count > prev:
+                print(f"[count {trk.count}] frame={idx}")
 
-        if show or writer or save_frames:
-            vis = frame.copy()
-            if trk.axis == "x":
-                cv2.line(vis, (trk.line_pos, 0), (trk.line_pos, h), (0, 0, 255), 2)
-            else:
-                cv2.line(vis, (0, trk.line_pos), (w, trk.line_pos), (0, 0, 255), 2)
-            for d in dets:
-                _, _, x, y, bw, bh = d
-                cv2.rectangle(vis, (int(x), int(y)), (int(x + bw), int(y + bh)),
-                              (0, 255, 0), 2)
-            # 轨迹 ID + 已计数高亮(便于人工核对)
-            for t in trk.tracks:
-                c = (int(t.cx), int(t.cy))
-                if t.counted:
-                    cv2.circle(vis, c, 6, (0, 255, 255), -1)   # 黄点=已计过
-                cv2.putText(vis, str(t.id), (c[0] + 6, c[1] - 6),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
-            cv2.putText(vis, f"count: {trk.count}", (20, 40),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 255), 2)
-            if writer:
-                writer.write(vis)
-            if save_frames:
-                cv2.imwrite(os.path.join(save_frames, f"frame_{idx:06d}.jpg"), vis)
-            if show:
-                cv2.imshow("count", vis)
-                if cv2.waitKey(1) == 27:
-                    break
+            if show or writer or save_frames:
+                vis = frame.copy()
+                if trk.axis == "x":
+                    cv2.line(vis, (trk.line_pos, 0), (trk.line_pos, h), (0, 0, 255), 2)
+                else:
+                    cv2.line(vis, (0, trk.line_pos), (w, trk.line_pos), (0, 0, 255), 2)
+                for d in dets:
+                    _, _, x, y, bw, bh = d
+                    cv2.rectangle(vis, (int(x), int(y)), (int(x + bw), int(y + bh)),
+                                  (0, 255, 0), 2)
+                # 轨迹 ID + 已计数高亮(便于人工核对)
+                for t in trk.tracks:
+                    c = (int(t.cx), int(t.cy))
+                    if t.counted:
+                        cv2.circle(vis, c, 6, (0, 255, 255), -1)   # 黄点=已计过
+                    cv2.putText(vis, str(t.id), (c[0] + 6, c[1] - 6),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+                cv2.putText(vis, f"count: {trk.count}", (20, 40),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 255), 2)
+                if writer:
+                    writer.write(vis)
+                if save_frames:
+                    cv2.imwrite(os.path.join(save_frames, f"frame_{idx:06d}.jpg"), vis)
+                if show:
+                    cv2.imshow("count", vis)
+                    if cv2.waitKey(1) == 27:
+                        break
+    finally:
+        src.release()
+        if writer:
+            writer.release()
+        if show:
+            cv2.destroyAllWindows()
 
-    src.release()
-    if writer:
-        writer.release()
-    if show:
-        cv2.destroyAllWindows()
 
     if profile and proc_ms:
         a = np.array(proc_ms)

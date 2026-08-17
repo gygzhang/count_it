@@ -2,7 +2,7 @@ import cv2
 import numpy as np
 import pytest
 
-from count_cv import count_source
+from counting import count_source
 from sources import FrameSource, natural_key
 
 
@@ -65,6 +65,9 @@ def test_count_source_releases_outputs_on_late_read_error(tmp_path, monkeypatch)
     class FakeWriter:
         def __init__(self):
             self.released = False
+        def isOpened(self):
+            return True
+
 
         def write(self, frame):
             pass
@@ -74,7 +77,7 @@ def test_count_source_releases_outputs_on_late_read_error(tmp_path, monkeypatch)
 
     writer = FakeWriter()
     destroyed = []
-    monkeypatch.setattr("count_cv.FrameSource", TrackingSource)
+    monkeypatch.setattr("counting.FrameSource", TrackingSource)
     monkeypatch.setattr(cv2, "VideoWriter", lambda *args: writer)
     monkeypatch.setattr(cv2, "imshow", lambda *args: None)
     monkeypatch.setattr(cv2, "waitKey", lambda delay: -1)

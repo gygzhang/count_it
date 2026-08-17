@@ -117,7 +117,7 @@ The existing crossing rules remain unchanged:
 2. Connect two nodes when their center distance is less than `merge_dist`.
 3. Compute transitive groups with union-find.
 4. Replace each group with the bounding rectangle covering every member.
-5. Emit groups in minimum-original-index order for deterministic output.
+5. Emit groups in a geometry-derived stable order `(x0, y0, x1, y1)`; use minimum original index only as a final tie-breaker for exactly coincident boxes. This makes output independent of contour enumeration while preserving deterministic results for identical geometry.
 
 This ensures an `A-B-C` chain merges into one group when `A` is close to `B` and `B` is close to `C`, regardless of contour order.
 

@@ -23,7 +23,7 @@ import json
 import os
 from concurrent.futures import ProcessPoolExecutor
 
-from count_cv import (resolve_method, detect_sequence, track_sequence,
+from counting import (resolve_method, detect_sequence, track_sequence,
                       count_source, find_gt)
 from sources import FrameSource, decode_all, scaled
 from params import DEFAULT_PARAMS, DETECTION_KEYS, TRACKING_KEYS

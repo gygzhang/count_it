@@ -414,6 +414,15 @@ def test_merge_close_is_transitive_and_order_independent():
     b = (4, 0, 4, 0, 2, 2)
     assert detector._merge_close([a, c, b]) == [(5, 1, 0, 0, 10, 2)]
     assert detector._merge_close([c, b, a]) == [(5, 1, 0, 0, 10, 2)]
+
+
+def test_disconnected_merge_groups_use_geometry_order():
+    detector = make_detector()
+    left = (0, 0, 0, 0, 2, 2)
+    right = (20, 0, 20, 0, 2, 2)
+    expected = [(1, 1, 0, 0, 2, 2), (21, 1, 20, 0, 2, 2)]
+    assert detector._merge_close([left, right]) == expected
+    assert detector._merge_close([right, left]) == expected
 ```
 
 Use the exact expected numeric tuple produced by the implemented bounding-box convention; the connection boundary remains strict `< merge_dist`.
@@ -426,7 +435,7 @@ Expected: current one-pass grouping returns two groups for at least one ordering
 
 - [ ] **Step 7: Implement union-find grouping minimally**
 
-Use pairwise distance checks and union-find. Group members by root, compute the union bounding rectangle, derive its center, and sort groups by their minimum original index. Do not add a spatial index.
+Use pairwise distance checks and union-find. Group members by root, compute each union bounding rectangle, derive its center, sort components by `(x0, y0, x1, y1)` with minimum original index only as a final tie-breaker, and do not add a spatial index.
 
 - [ ] **Step 8: Verify detector and tracker GREEN**
 

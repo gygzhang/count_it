@@ -23,9 +23,11 @@ import json
 import os
 from concurrent.futures import ProcessPoolExecutor
 
-from count_cv import (DEFAULT_PARAMS, DET_KEYS, TRK_KEYS, FrameSource,
-                      decode_all, resolve_method, detect_sequence,
-                      track_sequence, count_source, find_gt, scaled)
+from counting import (resolve_method, detect_sequence, track_sequence,
+                      count_source, find_gt)
+from sources import FrameSource, decode_all, scaled
+from params import (DEFAULT_PARAMS, DETECTION_KEYS, TRACKING_KEYS,
+                    UNSEARCHABLE_GRID_KEYS, merge_params, validate_params)
 import cv2
 
 
@@ -35,6 +37,76 @@ DEFAULT_GRID = {
     "morph_kernel": [5, 7, 9],
     "max_dist": [100, 150, 200],
 }
+
+
+def build_arg_parser():
+    p = argparse.ArgumentParser(description="网格搜索 count_cv 最佳参数(鲁棒+加速)")
+    p.add_argument("manifest", help="样例清单文件")
+    p.add_argument("--val", default=None, help="验证集清单(不参与搜索,只评泛化)")
+    p.add_argument("--topk", type=int, default=10)
+    p.add_argument("--out", default="best_params.json")
+    p.add_argument("--jobs", type=int, default=1, help="并行进程数(按样例)")
+    p.add_argument("--mem-mb", type=float, default=2000, help="每段帧缓存内存上限(MB)")
+    p.add_argument("--axis", choices=["x", "y"], default=None)
+    p.add_argument("--flow", choices=["pos", "neg", "both"], default=None)
+    p.add_argument("--method", choices=["auto", "color", "bgsub", "refbg", "thresh"], default=None)
+    p.add_argument("--line", type=float, default=None)
+    p.add_argument("--scale", type=float, default=None)
+    p.add_argument("--roi", default=None)
+    p.add_argument("--grid", default=None, help="自定义网格json")
+    return p
+
+
+def _grid_candidates(grid, base):
+    keys = list(grid)
+    for index, values in enumerate(itertools.product(*(grid[key] for key in keys))):
+        candidate = dict(base)
+        candidate.update(zip(keys, values))
+        yield index, candidate, values
+
+
+def parse_grid(raw, base, samples):
+    """Decode, validate, and preflight a deterministic parameter grid."""
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"invalid grid JSON: {exc}") from exc
+    if not isinstance(raw, dict) or not raw:
+        raise ValueError("grid must be a non-empty JSON object")
+
+    expected = set(DEFAULT_PARAMS)
+    for key, values in raw.items():
+        if key not in expected:
+            raise ValueError(f"grid key {key!r} is unknown")
+        if key in UNSEARCHABLE_GRID_KEYS:
+            raise ValueError(f"grid key {key!r} cannot be searched")
+        if not isinstance(values, list) or not values:
+            raise ValueError(f"grid key {key!r} must have a non-empty list")
+
+    grid = {key: list(values) for key, values in raw.items()}
+    candidates = list(_grid_candidates(grid, base))
+    for index, candidate, values in candidates:
+        try:
+            validate_params(candidate)
+        except ValueError as exc:
+            details = ", ".join(f"{key}={value!r}" for key, value in zip(grid, values))
+            raise ValueError(f"invalid grid combination {index} ({details}): {exc}") from exc
+
+    scale = base["scale"]
+    for path, _ in samples:
+        source = FrameSource(path)
+        width, height = int(source.w * scale), int(source.h * scale)
+        source.release()
+        for index, candidate, values in candidates:
+            try:
+                validate_params(candidate, width, height)
+            except ValueError as exc:
+                details = ", ".join(f"{key}={value!r}" for key, value in zip(grid, values))
+                raise ValueError(
+                    f"invalid grid combination {index} ({details}) for {path}: {exc}"
+                ) from exc
+    return grid
 
 
 class FrameCache:
@@ -102,8 +174,8 @@ def eval_sample(task):
     method, ref = resolve_method(base, cache.samples(), w, h)
 
     keys = list(grid.keys())
-    det_keys = [k for k in keys if k in DET_KEYS]
-    trk_keys = [k for k in keys if k in TRK_KEYS]
+    det_keys = [k for k in keys if k in DETECTION_KEYS]
+    trk_keys = [k for k in keys if k in TRACKING_KEYS]
 
     results = {}
     for det_vals in itertools.product(*[grid[k] for k in det_keys]):
@@ -169,39 +241,30 @@ def pick_robust(scored, grid):
     return tied[0], robustness(tied[0][2]), len(tied)
 
 
-def main():
-    p = argparse.ArgumentParser(description="网格搜索 count_cv 最佳参数(鲁棒+加速)")
-    p.add_argument("manifest", help="样例清单文件")
-    p.add_argument("--val", default=None, help="验证集清单(不参与搜索,只评泛化)")
-    p.add_argument("--topk", type=int, default=10)
-    p.add_argument("--out", default="best_params.json")
-    p.add_argument("--jobs", type=int, default=1, help="并行进程数(按样例)")
-    p.add_argument("--mem-mb", type=float, default=2000, help="每段帧缓存内存上限(MB)")
-    p.add_argument("--axis", choices=["x", "y"], default=None)
-    p.add_argument("--flow", choices=["pos", "neg", "both"], default=None)
-    p.add_argument("--method", choices=["auto", "color", "bgsub", "refbg"], default=None)
-    p.add_argument("--line", type=float, default=None)
-    p.add_argument("--scale", type=float, default=None)
-    p.add_argument("--roi", default=None)
-    p.add_argument("--grid", default=None, help="自定义网格json")
-    args = p.parse_args()
+def main(argv=None):
+    parser = build_arg_parser()
+    args = parser.parse_args(argv)
 
     samples = load_samples(args.manifest)
     print(f"样例 {len(samples)} 段: " +
           ", ".join(f"{os.path.basename(s)}(真值{g})" for s, g in samples))
 
-    base = dict(DEFAULT_PARAMS)
+    fixed = {}
     for key in ("axis", "flow", "method", "line", "scale", "roi"):
-        v = getattr(args, key)
-        if v is not None:
-            base[key] = v
+        value = getattr(args, key)
+        if value is not None:
+            fixed[key] = value
+    try:
+        base = merge_params(cli_params=fixed)
+        grid = parse_grid(args.grid if args.grid else DEFAULT_GRID, base, samples)
+    except (ValueError, RuntimeError) as exc:
+        parser.error(str(exc))
     scale = base["scale"]
 
-    grid = json.loads(args.grid) if args.grid else DEFAULT_GRID
     keys = list(grid.keys())
     n_combos = 1
-    for v in grid.values():
-        n_combos *= len(v)
+    for values in grid.values():
+        n_combos *= len(values)
     print(f"网格: {grid}")
     print(f"共 {n_combos} 组 × {len(samples)} 段 (分阶段+缓存, jobs={args.jobs}, "
           f"mem<={args.mem_mb}MB)\n")

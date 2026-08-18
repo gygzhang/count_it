@@ -13,7 +13,7 @@ import os
 import cv2
 import numpy as np
 
-from count_cv import FrameSource
+from sources import FrameSource
 
 
 def largest_true_run(mask):

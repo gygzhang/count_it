@@ -275,8 +275,51 @@ The metadata retains existing fields and adds:
   "output_resolution": [640, 360]
 }
 ```
+## Licensed Twemoji Outline Assets
+
+Emojipedia is used only as a category reference. Its About page states that displayed emoji images belong to their respective creators, so the generator must not scrape or redistribute those vendor images.
+
+The concrete image source is Twemoji v17.0.3 from the official `jdecked/twemoji` repository. Twemoji graphics are licensed under CC BY 4.0. The repository commits:
+
+- A curated manifest of outline-distinct Unicode objects covering tools, household items, office objects, electronics, music, containers, keys/locks, and equipment.
+- Processed transparent silhouette PNGs only, not the downloaded source PNGs.
+- The Twemoji graphics license and attribution notice.
+- Per-asset Unicode code point, CLDR-style name, upstream URL, Twemoji version, source SHA256, processed SHA256, and crop dimensions.
+
+Add a reproducible maintenance script `prepare_twemoji_objects.py`. It downloads only manifest-listed PNGs from version-pinned URLs, verifies HTTP success and source hashes when already recorded, and reads with `cv2.IMREAD_UNCHANGED`. Assets without a usable alpha channel are rejected.
+
+Processing is deterministic:
+
+1. Extract the source alpha channel; do not infer foreground from white, black, or colored rectangular backgrounds.
+2. Crop to the nonzero-alpha bounding box, preserving transparent holes inside the object.
+3. Threshold alpha at a fixed manifest-wide level to form the subject mask.
+4. Keep every connected component above a documented relative-area floor so detached but meaningful parts survive; remove only tiny antialiasing specks.
+5. Normalize into a square transparent canvas with fixed padding while preserving aspect ratio.
+6. Store the result as a single-channel transparent silhouette PNG with foreground alpha and zero RGB. The generator chooses the final object color/gray value.
+7. Validate positive foreground area and record both source and processed hashes.
+
+The runtime generator never downloads. It loads committed processed assets through a new shape profile:
+
+```text
+--shape-profile twemoji|mixed-assets
+--twemoji-manifest PATH
+```
+
+`twemoji` samples only processed silhouettes. `mixed-assets` assigns equal total probability to procedural contours and Twemoji silhouettes. `--shape-weights` may refer to manifest asset names as well as procedural names.
+
+Runtime compositing uses the silhouette alpha only:
+
+- Tight nonzero-alpha bounds define the source subject, not the PNG rectangle.
+- Resize and rotate a premultiplied alpha mask with antialiased interpolation.
+- Choose color using the existing gray/color object rules.
+- Composite only through alpha; transparent pixels never overwrite the rendered belt/background.
+- Compute bounding boxes, centroid, labels, and truth position from the transformed nonzero alpha support.
+- Preserve internal transparent holes such as key rings and scissors handles.
+
+Tests cover pinned download URLs with a local HTTP fixture, alpha-required rejection, deterministic crop/hash output, preservation of a detached meaningful component and an internal hole, absence of rectangular-background contamination after compositing, manifest/license completeness, and runtime reproducibility for a fixed seed.
 
 Metadata serialization is deterministic: object/event lists are ID/frame ordered and dictionaries use stable construction order. Output paths may differ between runs, so reproducibility tests compare rendered files and normalized metadata fields rather than requiring path fields to match.
+
 
 ## Validation
 

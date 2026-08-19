@@ -1,4 +1,4 @@
-# 传送带物体计数系统依赖
+# 通用目标计数核心依赖
 # 仅需 OpenCV 与 NumPy(多进程调参用标准库 concurrent.futures,无需 scipy)
 opencv-python>=4.5
 numpy>=1.20

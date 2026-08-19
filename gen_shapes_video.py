@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-生成传送带/流水线风格的合成检测视频。
+生成移动目标场景风格的合成检测视频。
 
 物体（不规则的圆 / 三角形 / 正方形 / 矩形，均带随机变形）从一侧匀速
-移动到另一侧，模拟传送带上连续经过的物体。可用于目标检测 + 计数任务的
+移动到另一侧，模拟连续经过的目标。可用于目标检测 + 计数任务的
 训练/测试数据生成，并可选导出 YOLO 格式真值标注与计数真值。
 
 示例:
     # 生成 20 秒、画面同时约 6 个物体、速度 300 px/s 的视频
-    python gen_shapes_video.py -o belt.mp4 --duration 20 --count 6 --speed 300
+    python gen_shapes_video.py -o moving_targets.mp4 --duration 20 --count 6 --speed 300
 
     # 同时导出 YOLO 标注 + 计数真值，并开启运动模糊 & 形状抖动
-    python gen_shapes_video.py -o belt.mp4 --labels labels --motion-blur 9 --wobble 0.15
+    python gen_shapes_video.py -o moving_targets.mp4 --labels labels --motion-blur 9 --wobble 0.15
 """
 import argparse
 import json
@@ -55,7 +55,7 @@ def deform(pts, amount, rng):
 
 
 class Obj:
-    """一个在传送带上移动的物体。"""
+    """一个在场景中移动的目标。"""
 
     def __init__(self, x, y, cfg, rng):
         self.shape = SHAPES[rng.integers(len(SHAPES))]
@@ -92,7 +92,7 @@ class Obj:
 
 
 def draw_belt(frame, offset, cfg):
-    """画传送带背景。灰度模式为均匀灰底；彩色模式加移动接缝线。"""
+    """绘制移动场景背景。灰度模式为均匀灰底；彩色模式加移动纹理线。"""
     frame[:] = cfg.bg_color
     if cfg.gray:
         return  # 均匀灰底，靠亮度区分物体，不画会干扰分割的接缝线
@@ -111,7 +111,7 @@ def overlaps(y_or_x, existing, min_gap):
 
 
 def main():
-    p = argparse.ArgumentParser(description="生成传送带合成检测视频")
+    p = argparse.ArgumentParser(description="生成移动目标合成检测视频")
     p.add_argument("-o", "--output", default="belt.mp4", help="输出视频路径")
     p.add_argument("--duration", type=float, default=15.0, help="时长(秒)")
     p.add_argument("--fps", type=int, default=30, help="帧率")
@@ -122,7 +122,7 @@ def main():
     p.add_argument("--direction", choices=["l2r", "r2l", "t2b", "b2t"],
                    default="l2r", help="移动方向")
     p.add_argument("--gray", action="store_true",
-                   help="灰度模式(物体靠亮度区分,均匀灰底,贴近工业相机)")
+                   help="灰度模式(物体靠亮度区分,均匀灰底)")
     p.add_argument("--noise", type=float, default=0.0, help="高斯传感器噪声标准差")
     p.add_argument("--min-size", type=float, default=28.0, help="物体半径下限(px)")
     p.add_argument("--max-size", type=float, default=48.0, help="物体半径上限(px)")
@@ -237,7 +237,7 @@ def main():
                     print(f"[GT cross {crossed}] frame={f} shape={o.shape} "
                           f"main_pos={main_pos:.1f}")
 
-        # 传感器噪声（模拟真实相机）
+        # 图像噪声（模拟采集噪声）
         if cfg.noise > 0:
             n = rng.normal(0, cfg.noise, frame.shape)
             frame = np.clip(frame.astype(np.float32) + n, 0, 255).astype(np.uint8)

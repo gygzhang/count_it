@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
-纯 OpenCV 传送带物体计数（不用深度学习）。
+纯 OpenCV 目标计数（不用深度学习）。
 
-输入可以是【视频文件】或【图片文件夹】(逐帧图片，工业现场常见)。
+输入可以是【视频文件】或【图片文件夹】(逐帧图片，常见图像采集格式)。
 流程分两阶段(便于调参复用):
   检测(Detector): 前景分离 -> 去噪 -> 轮廓 -> (可选粘连分割) -> 每帧检测点
   跟踪(Tracker):  速度预测匹配 -> 轨迹确认/方向门控 -> 越线(可迟滞)计数
 
 前景分离方式:
-  - bgsub:  背景减除(MOG2)，灰度工业相机常见
+  - bgsub:  背景减除(MOG2)，灰度图像常见
   - color:  HSV 饱和度(彩色物体/灰背景)
-  - refbg:  参考帧背景减除(空传送带基准图/自动中位数)，对传送带最稳
+  - refbg:  参考帧背景减除(空场景基准图/自动中位数)，对静态背景最稳
+  - otsu:   每帧自动选择暗目标/亮背景分界，适应曝光和增益变化
   - auto:   按采样帧饱和度在 color/bgsub 间自动选
 
 计数核心(Detector/Tracker)供调参脚本 tune_params.py 分阶段复用以提速。
@@ -222,11 +223,20 @@ class Detector:
         if self.method == "thresh":
             # 强度阈值:物体亮度在背景带 [lo,hi] 之外(过暗或过亮)。
             # 无状态,不建模,天然免疫任意纹理运动(只要物体亮度可区分)。
-            g = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            g = frame if frame.ndim == 2 else cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             lo, hi = self.P["thresh_lo"], self.P["thresh_hi"]
             return ((g < lo) | (g > hi)).astype(np.uint8) * 255
+        if self.method == "otsu":
+            # 目标比背景暗、但不要求接近纯黑。Otsu 每帧根据双峰灰度分布
+            # 自动选择分界，因此曝光/增益变化时无需手工修改 thresh_lo。
+            g = frame if frame.ndim == 2 else cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            self.last_threshold, mask = cv2.threshold(
+                g, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU
+            )
+            return mask
         if self.method == "refbg":
-            g = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.int16)
+            g = (frame if frame.ndim == 2 else
+                 cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)).astype(np.int16)
             fg = (np.abs(g - self.ref) > self.P["ref_thresh"]).astype(np.uint8) * 255
             a = self.P["ref_alpha"]
             if a > 0:   # 背景像素处慢更新参考帧，抗光照漂移
@@ -518,7 +528,7 @@ def count_source(source, params=None, fps=30.0, save=None, save_fps=None,
                 cv2.putText(vis, str(t.id), (c[0] + 6, c[1] - 6),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
             cv2.putText(vis, f"count: {trk.count}", (20, 40),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 255), 2)
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 2)
             if writer:
                 writer.write(vis)
             if save_frames:
@@ -570,7 +580,7 @@ def build_arg_parser():
     p.add_argument("source", help="视频文件 或 图片文件夹")
     p.add_argument("--fps", type=float, default=30.0, help="图片文件夹帧率(仅影响保存)")
     # 检测
-    p.add_argument("--method", choices=["auto", "color", "bgsub", "refbg", "thresh"],
+    p.add_argument("--method", choices=["auto", "color", "bgsub", "refbg", "thresh", "otsu"],
                    default="auto", help="前景分离方式")
     p.add_argument("--sat-thresh", type=int, default=60, help="color模式饱和度阈值")
     p.add_argument("--thresh-lo", type=int, default=50,

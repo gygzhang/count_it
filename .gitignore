@@ -16,3 +16,8 @@ best_params.json
 samples.txt
 hard_samples.txt
 val_samples.txt
+recordings/
+
+# PyInstaller build output (distribute the EXE separately, do not commit it)
+build/
+dist/

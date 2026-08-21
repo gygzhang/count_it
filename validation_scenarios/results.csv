@@ -1,0 +1,17 @@
+scenario,mode,fps,speed_px_s,step_px_frame,diameter_px,objects_on_screen,ground_truth,detected,error,absolute_error_pct,count_accuracy_pct,detect_seconds,video
+baseline,fixed,120,4800,40.0,50-70,12,0,0,0,0.0,100.0,0.277,validation_scenarios/baseline.mp4
+baseline,auto,120,4800,40.0,50-70,12,0,0,0,0.0,100.0,0.804,validation_scenarios/baseline.mp4
+small,fixed,120,4800,40.0,24-40,12,0,0,0,0.0,100.0,0.285,validation_scenarios/small.mp4
+small,auto,120,4800,40.0,24-40,12,0,0,0,0.0,100.0,0.831,validation_scenarios/small.mp4
+large,fixed,120,4800,40.0,80-110,12,0,0,0,0.0,100.0,0.329,validation_scenarios/large.mp4
+large,auto,120,4800,40.0,80-110,12,0,0,0,0.0,100.0,0.797,validation_scenarios/large.mp4
+slow,fixed,120,2400,20.0,50-70,12,0,0,0,0.0,100.0,0.269,validation_scenarios/slow.mp4
+slow,auto,120,2400,20.0,50-70,12,0,0,0,0.0,100.0,0.789,validation_scenarios/slow.mp4
+fast,fixed,120,7200,60.0,50-70,12,0,0,0,0.0,100.0,0.287,validation_scenarios/fast.mp4
+fast,auto,120,7200,60.0,50-70,12,0,0,0,0.0,100.0,0.784,validation_scenarios/fast.mp4
+low_fps,fixed,60,2400,40.0,50-70,12,0,0,0,0.0,100.0,0.165,validation_scenarios/low_fps.mp4
+low_fps,auto,60,2400,40.0,50-70,12,0,0,0,0.0,100.0,0.628,validation_scenarios/low_fps.mp4
+high_fps,fixed,300,12000,40.0,50-70,12,0,0,0,0.0,100.0,0.581,validation_scenarios/high_fps.mp4
+high_fps,auto,300,12000,40.0,50-70,12,0,0,0,0.0,100.0,0.93,validation_scenarios/high_fps.mp4
+hard_combo,fixed,120,7200,60.0,24-40,20,0,0,0,0.0,100.0,0.27,validation_scenarios/hard_combo.mp4
+hard_combo,auto,120,7200,60.0,24-40,20,0,0,0,0.0,100.0,0.723,validation_scenarios/hard_combo.mp4

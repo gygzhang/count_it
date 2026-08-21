@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>传送带计数 · 标注查看器</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>传送带计数 <span class="sub">标注查看器 / 参数验证</span></h1>
+  <div class="badges">
+    <span class="badge" id="badgeMethod">method —</span>
+    <span class="badge big" id="badgeCount">count —</span>
+    <span class="badge" id="badgeGt">gt —</span>
+    <span class="badge" id="badgeThru">— fps</span>
+  </div>
+</header>
+
+<div id="app">
+  <aside id="sidebar">
+    <section>
+      <h2>输入视频</h2>
+      <select id="videoSelect"></select>
+      <div class="row"><label class="file">上传外部视频<input type="file" id="uploadInput" accept="video/*"></label></div>
+      <div class="hint" id="videoHint"></div>
+    </section>
+
+    <section>
+      <h2>参数 <button id="resetParams" class="mini">重置</button></h2>
+      <select id="preset" title="快速参数预设">
+        <option value="">— 预设 —</option>
+        <option value="default">默认(auto)</option>
+        <option value="autoadapt">auto + 自适应校准</option>
+        <option value="thresh">强制 thresh</option>
+        <option value="bgsub">强制 bgsub</option>
+        <option value="watershed">auto-adapt + 分裂</option>
+      </select>
+      <div id="paramForm"></div>
+    </section>
+
+    <button id="runBtn" class="run">▶ 运行计数</button>
+    <div class="hint" id="runStatus"></div>
+
+    <section>
+      <h2>工具</h2>
+      <div class="tools">
+        <button class="tool" data-tool="autoparams">🎯 自动估参</button>
+        <button class="tool" data-tool="grid">▦ 网格搜索</button>
+        <button class="tool" data-tool="batch">▤ 批量跑</button>
+        <button class="tool" data-tool="tests">✓ 测试面板</button>
+      </div>
+    </section>
+  </aside>
+
+  <main id="stage">
+    <div id="viewer">
+      <canvas id="canvas"></canvas>
+      <div id="emptyState">选择或上传视频，设置参数后点击“运行计数”。</div>
+    </div>
+
+    <div id="toolbar">
+      <span class="grp">交互
+        <button class="mode active" data-mode="view" title="查看/点选轨迹">选择</button>
+        <button class="mode" data-mode="roi" title="拖拽画 ROI">画ROI</button>
+        <button class="mode" data-mode="line" title="拖动计数线">拖线</button>
+        <button id="clearRoi" class="mini" title="清除 ROI">清ROI</button>
+      </span>
+      <span class="grp">对比
+        <label><input type="checkbox" id="lyCompare"> 叠加 B(橙)</label>
+      </span>
+    </div>
+
+    <div id="transport">
+      <button id="playBtn" disabled>▶</button>
+      <button id="prevBtn" disabled>◀|</button>
+      <button id="nextBtn" disabled>|▶</button>
+      <button id="prevEvBtn" title="上一次越线 (,)" disabled>⟨⚑</button>
+      <button id="nextEvBtn" title="下一次越线 (.)" disabled>⚑⟩</button>
+      <input type="range" id="scrub" min="0" max="0" value="0" disabled>
+      <span class="frameLabel"><span id="frameIdx">0</span>/<span id="frameTot">0</span></span>
+      <label class="speed">播放fps <input type="number" id="playFps" value="20" min="1" max="120" step="1"></label>
+    </div>
+
+    <div id="layers">
+      <label><input type="checkbox" id="lyDet" checked> <b class="sw det"></b>检测框</label>
+      <label><input type="checkbox" id="lyTrack" checked> <b class="sw trk"></b>轨迹ID</label>
+      <label><input type="checkbox" id="lyCounted" checked> <b class="sw cnt"></b>已计数</label>
+      <label><input type="checkbox" id="lyLine" checked> <b class="sw line"></b>计数线</label>
+      <label><input type="checkbox" id="lyTruth" checked> <b class="sw truth"></b>真值框</label>
+      <label><input type="checkbox" id="lyMatch" checked> <b class="sw fp"></b>误检 <b class="sw fn"></b>漏检</label>
+      <label><input type="checkbox" id="lyMask"> <b class="sw mask"></b>前景掩膜</label>
+      <label><input type="checkbox" id="lyTrail"> <b class="sw trail"></b>轨迹尾迹</label>
+    </div>
+  </main>
+
+  <aside id="metrics">
+    <section>
+      <h2>运行记录 <button id="clearRuns" class="mini">清空</button></h2>
+      <div id="runsBox" class="runs"></div>
+    </section>
+    <section id="trackSect" class="hidden">
+      <h2>选中轨迹 <button id="clearTrack" class="mini">取消</button></h2>
+      <div id="trackBox" class="kv"></div>
+    </section>
+    <section><h2>解析结果</h2><div id="resolvedBox" class="kv"></div></section>
+    <section><h2>准确率</h2><div id="metricsBox" class="kv"></div></section>
+    <section><h2>耗时</h2><div id="timingBox" class="kv"></div></section>
+    <section><h2>本帧</h2><div id="frameBox" class="kv"></div></section>
+    <section><h2>计数时间线</h2><canvas id="timeline" height="60"></canvas></section>
+  </aside>
+</div>
+
+<div id="modal" class="modal hidden">
+  <div class="modal-card">
+    <div class="modal-head"><span id="modalTitle">工具</span><button id="modalClose" class="mini">✕</button></div>
+    <div id="modalBody" class="modal-body"></div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

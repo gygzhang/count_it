@@ -1,0 +1,15 @@
+Twemoji v17.0.3 graphics are Copyright 2025 Twitter, Inc and other contributors.
+
+This project uses the Twemoji graphics from the official jdecked/twemoji repository,
+version 17.0.3, under the Creative Commons Attribution 4.0 International license
+(CC BY 4.0): https://creativecommons.org/licenses/by/4.0/
+
+Source repository: https://github.com/jdecked/twemoji/tree/v17.0.3
+Source asset URLs are pinned in twemoji_objects_manifest.json. The preparation utility
+records source and processed SHA256 hashes. Only processed transparent alpha silhouettes
+are intended for redistribution; source downloads are temporary maintenance inputs.
+
+Attribution: Twemoji by Twitter, Inc and other contributors, licensed under CC BY 4.0.
+Changes: source graphics are converted to single-color transparent silhouettes by
+prepare_twemoji_objects.py; transparent holes and meaningful detached components are
+preserved.

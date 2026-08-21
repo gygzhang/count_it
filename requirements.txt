@@ -2,3 +2,6 @@
 # 仅需 OpenCV 与 NumPy(多进程调参用标准库 concurrent.futures,无需 scipy)
 opencv-python>=4.5
 numpy>=1.20
+
+# Web UI(可选,仅 webapp/ 需要;核心引擎无需)
+flask>=2.0

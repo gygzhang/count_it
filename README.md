@@ -13,6 +13,8 @@
 - [脚本 2:video_to_frames.py 抽帧](#脚本-2video_to_framespy--视频转图片)
 - [脚本 3:count_cv.py 计数引擎](#脚本-3count_cvpy--计数引擎)
 - [脚本 4:tune_params.py 自动调参](#脚本-4tune_paramspy--自动调参)
+- [多场景准确率验证](#多场景准确率验证)
+- [网页版查看器(webapp/)](#网页版查看器webapp)
 - [调参速查表(症状→调哪个)](#调参速查表症状调哪个参数)
 - [输入要求与假设](#输入要求与假设)
 - [已知限制](#已知限制)
@@ -52,8 +54,9 @@ pip install -r requirements.txt
 | `bgsub` | MOG2 背景建模,变化像素=前景 | 背景视觉均匀/静止;**多模态,能扛住周期性移动纹理**(带子花纹滚动) |
 | `color` | HSV 饱和度阈值 | 彩色物体 + 灰背景(灰纹理无饱和度,不受其运动影响) |
 | `thresh` | 灰度强度阈值:亮度在背景带 `[lo,hi]` 之外=前景 | **物体亮度明显区别于纹理带**;无状态、最快、免疫任意纹理运动 |
+| `otsu` | 逐帧 Otsu 自动定暗目标/亮背景分界 | **暗目标 + 较亮背景**;曝光/增益漂移无需手调阈值;单侧(混合极性/亮目标不适用) |
 | `refbg` | 减一张"空传送带"基准图 | 能拿到无物体背景;**仅静态背景**(移动纹理会失效) |
-| `auto` | 按高饱和像素占比自动在 color/bgsub 间选 | 默认(不会选 thresh/refbg) |
+| `auto` | 高饱和→color;灰度均匀底→**thresh**(自动估计背景带 `[lo,hi]`,更快且免疫纹理);灰度花纹底→bgsub | 默认(不自动选 refbg) |
 
 **计数原理**:每条轨迹的质心**穿过一条虚拟线**时计一次(每条轨迹只计一次)。
 
@@ -120,6 +123,58 @@ python3 video_to_frames.py belt.mp4 frames_belt --ext jpg
 
 输入可是**视频文件**或**图片文件夹**;灰度/彩色**自动识别**。
 
+## 多场景准确率验证
+
+`validate_scenarios.py` 会用同一种 Twemoji 轮廓生成多组短视频，改变物体
+尺寸、速度和 FPS，再读取生成器真值并输出每组的检测数、误差和准确率。
+报告同时写为 JSON、CSV 和 Markdown。
+
+```bash
+# 快速验证自动适配
+python validate_scenarios.py --profile quick --mode auto
+
+# 与旧的固定参数对照；已有视频可跳过重新生成
+python validate_scenarios.py --profile quick --mode both --reuse
+```
+
+默认输出在 `validation_scenarios/`。`smoke` 适合快速检查脚本，
+`quick` 使用 800×500 画面，`full` 覆盖更多组合。准确率定义为
+`max(0, 100% - |检测数-真值|/真值×100%)`；同时保留带方向的原始误差。
+
+## 网页版查看器(webapp/)
+
+浏览器里**跑不同参数/方式的计数、逐帧核对标注、验证外部视频**。后端 Flask
+调用计数引擎,把每帧检测/轨迹/越线事件导出为 JSON,前端用 canvas 叠框
+(检测框/轨迹ID/计数线/已计数/真值框),避开标注视频编码的浏览器兼容问题。
+
+```bash
+pip install flask            # 仅网页版需要;核心引擎无需
+python3 webapp/app.py        # -> http://127.0.0.1:5000
+```
+
+- **左栏**:选内置样例(`validation_scenarios/`、`~/tmp`)或**上传外部视频**;完整参数面板 + **快速预设**(默认 / auto-adapt / 强制 thresh|bgsub / 分裂),留空用默认。
+- **中间**:标注播放器——播放/逐帧/拖动、**越线事件跳转**、图层开关、计数时间线;快捷键 `空格`播放、`←/→`逐帧、`,`/`.`跳事件。
+- **右栏**:**运行记录**(累积每次运行,点卡片切换/对比 count·误差·P/R·耗时——直观看出 auto_adapt 等参数的增益)、解析结果(方式 + 自动阈值带 + auto-adapt 诊断)、准确率(检测数 vs 真值;有逐帧标注给 precision/recall、TP/FP/FN)、耗时。
+- **匹配诊断**(有逐帧真值时):检测框按 IoU 匹配上色(绿=命中 TP、红=误检 FP),漏检的真值框橙色虚线(FN)——把聚合 PR 变成逐帧可视诊断。
+
+**交互(画布上直接操作)**
+- **画 ROI / 拖计数线**(工具栏切换):鼠标框选 ROI 或拖动计数线,松手即重算——**改跟踪参数(如线位置)命中检测缓存,毫秒级返回**,不用手填坐标。
+- **前景掩膜图层**:叠加 `Detector` 分离+形态学后的二值掩膜,一眼看出漏检/误检是"没分离到"还是"被形态学吃掉"。
+- **叠加对比 B**:在运行记录里把某次运行设为 B,同帧叠橙色检测框 + 计数差,可视化改参前后的差异。
+- **点选轨迹**:点某条轨迹看其出现/越线帧、位置、速度、hits;可全局显示轨迹尾迹。
+
+**工具(左栏)**
+- **自动估参**:对当前视频跑 `auto_params` 估初值,一键填入参数表。
+- **网格搜索**:选参数×候选值扫描,按 |误差| 排序高亮最优,点行套用;跟踪类网格共享一次检测,极快。
+- **批量跑**:一套参数扫多个视频,出 count/误差/P/R/耗时对比表。
+- **测试面板**:一键 `pytest`、查看多场景验证报告。
+
+> 性能:按 `(视频,scale)` 缓存已 dump 的帧、按检测参数签名缓存检测序列与掩膜,跟踪参数改动只重跑跟踪(见交互重算)。
+
+**真值来源**:同名 `*_meta.json`(总越线数)+ 可选 `<视频名>_labels/` 逐帧标注
+(生成器 `--labels` 产出的 `frame_*.json`/`.txt`);外部视频无真值时只显示计数。
+运行产物(处理后帧 + `annotations.json`)写到 `~/tmp/inv_web_runs/`,不污染仓库。
+
 **支持的输入格式**
 - **视频**:走 OpenCV 解码,支持 mp4/avi/mov/mkv/webm/m4v/flv 等常见格式(取决于系统 ffmpeg)。
 - **图片文件夹**:jpg/jpeg/png/bmp/tif/tiff/webp/ppm/pgm 等;文件名**自然排序**(`frame2` 排在 `frame10` 前,非零填充命名也正确)。
@@ -133,7 +188,7 @@ python3 count_cv.py frames_belt --method refbg --roi 0,200,1280,520 \
 ### 前景分离参数
 | 参数 | 默认 | 说明 / 何时调 |
 |------|------|--------------|
-| `--method` | auto | auto/bgsub/color/thresh/refbg(见[核心概念](#核心概念)) |
+| `--method` | auto | auto/bgsub/color/thresh/refbg/**otsu**(见[核心概念](#核心概念)) |
 | `--sat-thresh` | 60 | color 模式饱和度阈值;物体颜色淡→调低 |
 | `--thresh-lo` `--thresh-hi` | 50 / 205 | thresh 模式:亮度 `<lo` 或 `>hi` 判为前景(背景带在 `[lo,hi]` 内)。亮物体调 hi、暗物体调 lo |
 | `--bg-history` | 200 | MOG2 背景建模历史帧;背景变化快→调小 |
@@ -306,3 +361,17 @@ A: 绝对 `--min-area` 是像素,缩放后面积缩 4 倍会被误滤。**改用
 
 **Q: 高速视频轨迹乱跳/漏计**
 A: `--max-dist` 调到 ≥ 每帧位移(速度/帧率);仍不行说明帧率不足。
+
+## Twemoji 透明对象资源（可选）
+
+项目提供 `prepare_twemoji_objects.py`，从固定版本 Twemoji v17.0.3 官方仓库下载 PNG，校验 Alpha 通道并裁剪透明外边距，输出透明轮廓资源（见 `twemoji_objects_manifest.json`）。
+
+```bash
+# 维护/首次准备资源（需要网络）
+python prepare_twemoji_objects.py twemoji_objects_manifest.json --out-dir twemoji_assets
+
+# 使用 Twemoji 资源生成传送带视频
+python gen_shapes_video.py -o twemoji_demo.mp4 --duration 10 --twemoji-assets twemoji_assets --labels twemoji_labels
+```
+
+处理流程保留主体内部透明孔洞和有意义的分离部件；合成时使用 Alpha 混合，YOLO 框按变换后的非透明区域计算，不会污染传送带背景。资源及处理元数据记录于 manifest，许可信息见 `THIRD_PARTY_TWEMOJI_LICENSE.txt`。

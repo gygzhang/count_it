@@ -69,6 +69,11 @@
       <span class="grp">对比
         <label><input type="checkbox" id="lyCompare"> 叠加 B(橙)</label>
       </span>
+      <span class="grp">分段
+        <button id="prevSeg" title="上一段" disabled>◀段</button>
+        <span id="segInfo" class="seg">—</span>
+        <button id="nextSeg" title="下一段" disabled>段▶</button>
+      </span>
     </div>
 
     <div id="transport">
@@ -78,7 +83,7 @@
       <button id="prevEvBtn" title="上一次越线 (,)" disabled>⟨⚑</button>
       <button id="nextEvBtn" title="下一次越线 (.)" disabled>⚑⟩</button>
       <input type="range" id="scrub" min="0" max="0" value="0" disabled>
-      <span class="frameLabel"><span id="frameIdx">0</span>/<span id="frameTot">0</span></span>
+      <span class="frameLabel">帧 <span id="frameIdx">0</span>/<span id="frameTot">0</span></span>
       <label class="speed">播放fps <input type="number" id="playFps" value="20" min="1" max="120" step="1"></label>
     </div>
 

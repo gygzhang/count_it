@@ -164,7 +164,7 @@ def run():
     max_frames = _max_frames(body)
     try:
         result = annotate.run_cached(video, params, float(body.get("fps") or 30.0),
-                                     max_frames, CACHE_ROOT)
+                                     max_frames, CACHE_ROOT, start=int(body.get("start") or 0))
     except Exception as exc:   # noqa: BLE001 - surface engine errors to the UI
         return jsonify({"error": f"运行失败: {exc}"}), 500
 
@@ -189,7 +189,7 @@ def batch():
         return jsonify({"error": "没有有效视频"}), 400
     params = coerce_params(body.get("params"))
     max_frames = _max_frames(body)
-    rows = annotate.batch_run(videos, params, 30.0, max_frames, CACHE_ROOT)
+    rows = annotate.batch_run(videos, params, 30.0, max_frames, CACHE_ROOT, start=int(body.get("start") or 0))
     return jsonify({"rows": rows})
 
 
@@ -210,7 +210,7 @@ def grid():
         return jsonify({"error": "网格为空或参数名无效"}), 400
     max_frames = _max_frames(body)
     try:
-        out = annotate.grid_search(video, base, grid_spec, 30.0, max_frames, CACHE_ROOT)
+        out = annotate.grid_search(video, base, grid_spec, 30.0, max_frames, CACHE_ROOT, start=int(body.get("start") or 0))
     except Exception as exc:   # noqa: BLE001
         return jsonify({"error": f"网格搜索失败: {exc}"}), 500
     return jsonify(out)

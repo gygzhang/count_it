@@ -117,3 +117,7 @@ pre.out{background:#0b0e13;border:1px solid var(--line);border-radius:6px;paddin
 .runcard .top .cmp{border:1px solid var(--line);border-radius:4px;padding:0 5px;font-size:10px;
   cursor:pointer;color:var(--mut)}
 .runcard .top .cmp.on{background:#c96a1e;border-color:#c96a1e;color:#fff}
+#toolbar button{background:var(--panel2);color:var(--fg);border:1px solid var(--line);
+  border-radius:6px;padding:4px 10px;cursor:pointer;font:inherit}
+#toolbar button:disabled{opacity:.4;cursor:default}
+#segInfo{color:var(--mut);min-width:96px;text-align:center;font-size:12px}

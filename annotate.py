@@ -276,19 +276,40 @@ def _hash(*parts):
     return hashlib.sha1("|".join(str(p) for p in parts).encode()).hexdigest()[:16]
 
 
-def _decode(video, scale, fps, max_frames):
+def _probe(video, scale, fps):
+    """Read dimensions/fps/total frame count without decoding pixels."""
     src = FrameSource(video, fps)
-    src_fps = float(src.fps or fps)
-    w, h = int(src.w * scale), int(src.h * scale)
-    frames = []
-    for f in src.frames():
-        frames.append(scaled(f, scale, w, h))
-        if max_frames and len(frames) >= max_frames:
-            break
+    info = (int(src.w * scale), int(src.h * scale), float(src.fps or fps), int(src.n or 0))
     src.release()
-    if not frames:
-        raise RuntimeError("无法从输入解码任何帧")
-    return frames, w, h, src_fps
+    return info
+
+
+def _iter_window(video, scale, fps, start, count):
+    """Stream up to ``count`` scaled frames from ``start`` one at a time.
+
+    Seeks (video) or slices the file list (folder) so only a single frame is
+    resident at a time -> RAM is independent of segment length."""
+    src = FrameSource(video, fps)
+    w, h = int(src.w * scale), int(src.h * scale)
+    try:
+        if src.is_dir:
+            stop = (start + count) if count else None
+            for fp in src.files[start:stop]:
+                img = cv2.imread(fp)
+                if img is not None:
+                    yield scaled(img, scale, w, h)
+        else:
+            if not src.live and start > 0:
+                src.cap.set(cv2.CAP_PROP_POS_FRAMES, int(start))
+            i = 0
+            while not count or i < count:
+                ret, f = src.cap.read()
+                if not ret:
+                    break
+                yield scaled(f, scale, w, h)
+                i += 1
+    finally:
+        src.release()
 
 
 def _det_sig(P):
@@ -331,59 +352,65 @@ def _paste_mask(mask, w, h, roi):
     return full
 
 
-def ensure_frames(video, scale, fps, max_frames, cache_root):
-    """Decode + dump processed frames once; returns (key, info, frames_or_None).
+def _populate(fkey, dkey, video, scale, fps, start, max_frames, P, cache_root):
+    """Single streaming pass over the window [start, start+max_frames):
+    dump clean frames and/or detect + dump masks.  Only a small calibration
+    buffer plus one frame are held in RAM, so memory is bounded regardless of
+    how long the video is."""
+    need_frames = fkey not in _FRAMES
+    need_det = dkey not in _DETS
+    w, h, src_fps, total = _probe(video, scale, fps)
 
-    Key is scoped to path+mtime+scale+max_frames+fps+cache_root so different
-    fps (image folders), cache roots, or edited files never collide."""
-    key = _hash(os.path.realpath(video), os.path.getmtime(video), scale,
-                max_frames, round(float(fps), 3), os.path.realpath(cache_root))
-    with _LOCK:
-        if key in _FRAMES:
-            return key, _FRAMES[key], None
-        frames, w, h, src_fps = _decode(video, scale, fps, max_frames)
-        fdir = os.path.join(cache_root, "frames", key)
-        os.makedirs(fdir, exist_ok=True)
-        for i, f in enumerate(frames):
-            cv2.imwrite(os.path.join(fdir, f"frame_{i:06d}.jpg"), f,
-                        [cv2.IMWRITE_JPEG_QUALITY, 80])
-        _FRAMES[key] = {"dir": fdir, "w": w, "h": h, "src_fps": src_fps, "n": len(frames)}
-        _lru_frames()
-        return key, _FRAMES[key], frames
-
-
-def ensure_detection(fkey, finfo, frames, video, scale, fps, max_frames, P, cache_root):
-    """Resolve method + optional auto-adapt + detect + dump masks (cached)."""
-    w, h, src_fps = finfo["w"], finfo["h"], finfo["src_fps"]
-    dkey = _hash(fkey, _det_sig(P))          # fkey already scopes fps/cache_root
-    with _LOCK:
-        if dkey in _DETS:
-            return dkey, _DETS[dkey]
-        if frames is None:
-            frames, w, h, src_fps = _decode(video, scale, fps, max_frames)
-        method, ref = resolve_method(P, frames, w, h)   # may write thresh band into P
+    det = mask_dir = None
+    method, band, diag, auto_trk = "bgsub", None, {}, {}
+    dets_seq, det_ms = [], []
+    if need_det:
+        # Bounded calibration buffer (consecutive from the window start).
+        calib_n = int(P.get("calibration_frames", 48)) if P.get("auto_adapt") else 16
+        if max_frames:
+            calib_n = min(calib_n, max_frames)
+        calib = list(_iter_window(video, scale, fps, start, calib_n))
+        if not calib:
+            raise RuntimeError("无法从输入解码任何帧")
+        method, ref = resolve_method(P, calib, w, h)   # may write thresh band into P
         band = [int(P["thresh_lo"]), int(P["thresh_hi"])] if method == "thresh" else None
-        diag, Pdet = {}, P
+        Pdet = P
         if P.get("auto_adapt"):
-            Pdet, diag = auto_adapt_params(P, frames, method, w, h, ref, fps=src_fps)
+            Pdet, diag = auto_adapt_params(P, calib, method, w, h, ref, fps=src_fps)
         auto_trk = {k: Pdet[k] for k in AUTO_TRK_KEYS if k in Pdet} if P.get("auto_adapt") else {}
         det = Detector(Pdet, method, w, h, ref)
         mask_dir = os.path.join(cache_root, "masks", dkey)
         os.makedirs(mask_dir, exist_ok=True)
-        dets_seq, det_ms = [], []
-        for i, f in enumerate(frames):
+        del calib
+
+    fdir = os.path.join(cache_root, "frames", fkey)
+    if need_frames:
+        os.makedirs(fdir, exist_ok=True)
+    n = 0
+    for f in _iter_window(video, scale, fps, start, max_frames):
+        if need_frames:
+            cv2.imwrite(os.path.join(fdir, f"frame_{n:06d}.jpg"), f,
+                        [cv2.IMWRITE_JPEG_QUALITY, 80])
+        if need_det:
             t0 = time.perf_counter()
             dets = det.detect(f)
             det_ms.append((time.perf_counter() - t0) * 1000.0)
             dets_seq.append(dets)
-            cv2.imwrite(os.path.join(mask_dir, f"frame_{i:06d}.jpg"),
+            cv2.imwrite(os.path.join(mask_dir, f"frame_{n:06d}.jpg"),
                         _paste_mask(det.last_mask, w, h, det.roi),
                         [cv2.IMWRITE_JPEG_QUALITY, 70])
+        n += 1
+    if n == 0:
+        raise RuntimeError("窗口内无可解码帧(检查起始帧)")
+    if need_frames:
+        _FRAMES[fkey] = {"dir": fdir, "w": w, "h": h, "src_fps": src_fps,
+                         "n": n, "start": start, "total": total}
+        _lru_frames()
+    if need_det:
         _DETS[dkey] = {"dets_seq": dets_seq, "mask_dir": mask_dir, "fkey": fkey,
                        "method": method, "band": band, "diag": diag,
                        "auto_trk": auto_trk, "det_ms": det_ms, "w": w, "h": h}
         _lru_dets()
-        return dkey, _DETS[dkey]
 
 
 def _track_frames(dets_seq, P, w, h, method):
@@ -408,14 +435,22 @@ def _track_frames(dets_seq, P, w, h, method):
     return out, int(trk.count), track_ms, trk
 
 
-def run_cached(video, params=None, fps=30.0, max_frames=0, cache_root="."):
-    """Cached staged run for the web app. Reuses dumped frames + cached
-    detections so tracker-only parameter changes re-count almost instantly."""
+def run_cached(video, params=None, fps=30.0, max_frames=0, cache_root=".", start=0):
+    """Cached streaming run over the window [start, start+max_frames).
+
+    Frames are dumped and detections cached, so tracker-only parameter changes
+    re-count almost instantly and RAM stays bounded regardless of video length
+    (long videos are viewed a segment at a time via ``start``)."""
     P = {**DEFAULT_PARAMS, **(params or {})}
     scale = float(P.get("scale", 1.0) or 1.0)
-    fkey, finfo, frames = ensure_frames(video, scale, fps, max_frames, cache_root)
-    dkey, dc = ensure_detection(fkey, finfo, frames, video, scale, fps,
-                                max_frames, dict(P), cache_root)
+    start = max(0, int(start or 0))
+    fkey = _hash(os.path.realpath(video), os.path.getmtime(video), scale,
+                 start, max_frames, round(float(fps), 3), os.path.realpath(cache_root))
+    dkey = _hash(fkey, _det_sig(P))
+    with _LOCK:
+        if fkey not in _FRAMES or dkey not in _DETS:
+            _populate(fkey, dkey, video, scale, fps, start, max_frames, dict(P), cache_root)
+        finfo, dc = _FRAMES[fkey], _DETS[dkey]
     w, h = dc["w"], dc["h"]
     Ptrk = {**DEFAULT_PARAMS, **dc["auto_trk"], **(params or {})}
     frames_data, count, track_ms, trk = _track_frames(dc["dets_seq"], Ptrk, w, h, dc["method"])
@@ -427,7 +462,8 @@ def run_cached(video, params=None, fps=30.0, max_frames=0, cache_root="."):
         resolved["thresh_lo"], resolved["thresh_hi"] = dc["band"]
     return {
         "meta": {"source": str(video), "width": w, "height": h,
-                 "src_fps": round(finfo["src_fps"], 3), "frames": finfo["n"], "scale": scale},
+                 "src_fps": round(finfo["src_fps"], 3), "frames": finfo["n"],
+                 "start": finfo["start"], "total": finfo["total"], "scale": scale},
         "resolved": resolved,
         "line": {"axis": trk.axis, "pos": int(trk.line_pos), "band": float(trk.band)},
         "count": count,
@@ -440,12 +476,12 @@ def run_cached(video, params=None, fps=30.0, max_frames=0, cache_root="."):
     }
 
 
-def batch_run(videos, params=None, fps=30.0, max_frames=0, cache_root="."):
+def batch_run(videos, params=None, fps=30.0, max_frames=0, cache_root=".", start=0):
     """Run one parameter set across several videos; returns a comparison list."""
     rows = []
     for v in videos:
         try:
-            res = run_cached(v, params, fps, max_frames, cache_root)
+            res = run_cached(v, params, fps, max_frames, cache_root, start=start)
             truth = load_truth(v, res["meta"]["width"], res["meta"]["height"], res["meta"]["scale"])
             m = frame_metrics(res, truth) if truth else None
             rows.append({"video": os.path.basename(v), "path": v, "ok": True,
@@ -458,7 +494,7 @@ def batch_run(videos, params=None, fps=30.0, max_frames=0, cache_root="."):
     return rows
 
 
-def grid_search(video, base_params, grid, fps=30.0, max_frames=0, cache_root="."):
+def grid_search(video, base_params, grid, fps=30.0, max_frames=0, cache_root=".", start=0):
     """Small grid search on one video, ranked by |count-error| then SAE-style.
 
     ``grid`` maps parameter name -> list of candidate values.  Tracker-only
@@ -468,7 +504,7 @@ def grid_search(video, base_params, grid, fps=30.0, max_frames=0, cache_root="."
     rows = []
     for combo in combos:
         params = {**(base_params or {}), **dict(zip(keys, combo))}
-        res = run_cached(video, params, fps, max_frames, cache_root)
+        res = run_cached(video, params, fps, max_frames, cache_root, start=start)
         truth = load_truth(video, res["meta"]["width"], res["meta"]["height"], res["meta"]["scale"])
         m = frame_metrics(res, truth) if truth else None
         rows.append({"combo": dict(zip(keys, combo)), "count": res["count"],

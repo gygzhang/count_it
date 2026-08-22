@@ -58,6 +58,9 @@ function renderParams(){
   const mf=document.createElement('div'); mf.className='pf full';
   mf.innerHTML='<label>max_frames (0=全部, 上限1500)</label><input type="number" id="p_max_frames" step="50" placeholder="600">';
   box.appendChild(mf);
+  const sf=document.createElement('div'); sf.className='pf full';
+  sf.innerHTML='<label>起始帧 start(长视频分段, 0=从头)</label><input type="number" id="p_start" step="100" placeholder="0">';
+  box.appendChild(sf);
 }
 function collectParams(){
   const p={};
@@ -71,6 +74,8 @@ function bindEvents(){
   $('videoSelect').onchange=updVideoHint;
   $('resetParams').onclick=()=>{renderParams();};
   $('runBtn').onclick=()=>run();
+  $('prevSeg').onclick=()=>gotoSegment(-1);
+  $('nextSeg').onclick=()=>gotoSegment(1);
   $('uploadInput').onchange=upload;
   $('preset').onchange=e=>{applyPreset(e.target.value); e.target.value='';};
   $('clearRuns').onclick=()=>{runs=[]; renderRuns();};
@@ -112,6 +117,7 @@ async function run(opts={}){
   if(!video){$('runStatus').textContent='请先选择视频';return;}
   const body={video, params:collectParams()};
   const mf=$('p_max_frames').value; if(mf!=='')body.max_frames=+mf;
+  const st=$('p_start').value; if(st!=='')body.start=+st;
   $('runBtn').disabled=true; $('runStatus').textContent='运行中…';
   try{
     const j=await (await fetch('/api/run',{method:'POST',headers:{'Content-Type':'application/json'},
@@ -144,10 +150,27 @@ async function loadRun(runId, opts={}){
   buildTrails();
   cur = opts.keepCur ? Math.min(cur,N-1) : 0;
   $('emptyState').style.display='none'; cv.style.display='block';
-  ['playBtn','prevBtn','nextBtn','scrub','prevEvBtn','nextEvBtn'].forEach(id=>$(id).disabled=false);
-  $('scrub').max=N-1; $('frameTot').textContent=N;
+  ['playBtn','prevBtn','nextBtn','scrub','prevEvBtn','nextEvBtn','prevSeg','nextSeg'].forEach(id=>$(id).disabled=false);
+  $('scrub').max=N-1; updateSegInfo();
   renderRuns(); renderSummary(); render();
   $('runStatus').textContent=`完成 · ${N} 帧`;
+}
+function updateSegInfo(){
+  if(!anno) return;
+  const m=anno.meta, n=m.frames, s=m.start||0, tot=m.total||0;
+  $('frameTot').textContent = tot || n;
+  $('segInfo').textContent = tot ? `${s}–${s+n}/${tot}` : `${s}–${s+n}`;
+  $('prevSeg').disabled = s<=0;
+  $('nextSeg').disabled = tot ? (s+n>=tot) : false;
+}
+function gotoSegment(dir){
+  if(!anno) return;
+  const n=anno.meta.frames, s=anno.meta.start||0, tot=anno.meta.total||0;
+  let ns = s + dir*n;
+  if(ns<0) ns=0;
+  if(tot && ns>=tot) return;
+  $('p_start').value=ns; if($('p_max_frames').value==='') $('p_max_frames').value=n;
+  run({keepCur:true});
 }
 
 function ensureMask(i){
@@ -241,7 +264,7 @@ function render(){
   ctx.fillStyle='#ffd23f';ctx.font='bold 20px monospace';ctx.fillText('count '+fr.count,12,26);
   if($('lyCompare').checked&&compareAnno) {ctx.fillStyle='#ff9f40';ctx.font='bold 14px monospace';
     ctx.fillText('B '+compareAnno.count+`  (Δ${fr.count-lastCount(compareAnno)})`,12,46);}
-  $('frameIdx').textContent=cur; $('scrub').value=cur; renderFrameBox(fr); markTimeline();
+  $('frameIdx').textContent=(anno.meta.start||0)+cur; $('scrub').value=cur; renderFrameBox(fr); markTimeline();
 }
 function lastCount(a){return a.frames[Math.min(cur,a.frames.length-1)].count;}
 
@@ -371,6 +394,7 @@ async function runGrid(){
   $('gridOut').innerHTML='<div class="hint">搜索中…</div>';
   const body={video:$('videoSelect').value, base_params:collectParams(), grid};
   const mf=$('p_max_frames').value; if(mf!=='')body.max_frames=+mf;
+  const st=$('p_start').value; if(st!=='')body.start=+st;
   const j=await (await fetch('/api/grid',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json();
   if(j.error){$('gridOut').innerHTML='<div class="bad">'+j.error+'</div>';return;}
   const head=`<tr>${j.keys.map(k=>`<th>${k}</th>`).join('')}<th>count</th><th>gt</th><th>误差</th><th>P</th><th>R</th><th>ms</th></tr>`;
@@ -394,6 +418,7 @@ async function runBatch(){
   if(!videos.length){$('batchOut').innerHTML='<div class="bad">请勾选至少一个视频</div>';return;}
   $('batchOut').innerHTML='<div class="hint">运行中…</div>';
   const body={videos, params:collectParams()}; const mf=$('p_max_frames').value; if(mf!=='')body.max_frames=+mf;
+  const st=$('p_start').value; if(st!=='')body.start=+st;
   const j=await (await fetch('/api/batch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json();
   if(j.error){$('batchOut').innerHTML='<div class="bad">'+j.error+'</div>';return;}
   const rows=j.rows.map(r=>r.ok?`<tr><td>${r.video}</td><td>${r.method}</td><td>${r.count}</td><td>${r.gt??'—'}</td>`+

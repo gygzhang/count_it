@@ -534,7 +534,9 @@ class Detector:
             y0 = min(g[3] for g in group)
             x1 = max(g[2] + g[4] for g in group)
             y1 = max(g[3] + g[5] for g in group)
-            merged.append(((x0 + x1) / 2, (y0 + y1) / 2, x0, y0, x1 - x0, y1 - y0))
+            mult = sum(int(g[6]) if len(g) > 6 else 1 for g in group)
+            merged.append(((x0 + x1) / 2, (y0 + y1) / 2, x0, y0,
+                           x1 - x0, y1 - y0, mult))
         return merged
 
     def _watershed_parts(self, contour, mask_shape, min_distance=0.0,
@@ -828,6 +830,7 @@ class Tracker:
                 t.vx, t.vy = cx - t.cx, cy - t.cy
                 t.cx, t.cy = cx, cy
                 t.area = float(dets[di][4] * dets[di][5])
+                t.multiplicity = int(dets[di][6]) if len(dets[di]) > 6 else 1
                 t.matched = True
                 t.missing = 0
                 t.hits += 1

@@ -326,9 +326,14 @@ function applyPreset(name){const p=PRESETS[name];if(!p)return;Object.entries(p).
 
 // ---- F3 compare ----
 async function toggleCompare(id){
-  if(compareId===id){compareId=null;compareAnno=null;$('lyCompare').checked=false;}
-  else{compareId=id;compareAnno=await (await fetch(`/api/run/${id}/annotations.json`)).json();$('lyCompare').checked=true;}
-  renderRuns(); render();
+  if(compareId===id){compareId=null;compareAnno=null;$('lyCompare').checked=false;renderRuns();render();return;}
+  const b=await (await fetch(`/api/run/${id}/annotations.json`)).json();
+  if(!anno || b.meta.width!==anno.meta.width || b.meta.height!==anno.meta.height
+     || b.frames.length!==anno.frames.length){
+    $('runStatus').textContent='对比需与当前 run 同分辨率且同帧数(通常同一视频)';
+    renderRuns(); return;
+  }
+  compareId=id; compareAnno=b; $('lyCompare').checked=true; renderRuns(); render();
 }
 
 // ---- F5-F8 tools modal ----
@@ -406,7 +411,7 @@ function toolTests(){
   $('runValidate').onclick=async()=>{$('testOut').innerHTML='<div class="hint">读取验证报告…</div>';
     const j=await (await fetch('/api/validate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({run:false})})).json();
     if(j.error){$('testOut').innerHTML='<div class="bad">'+j.error+'</div>';return;}
-    const rows=(j.results||[]).map(r=>`<tr><td>${r.scenario||r.name||''}</td><td>${r.mode||''}</td><td>${r.detected??''}</td><td>${r.gt??r.ground_truth??''}</td><td>${r.error??''}</td><td>${r.accuracy??''}</td></tr>`).join('');
+    const rows=(j.results||[]).map(r=>`<tr><td>${r.scenario||r.name||''}</td><td>${r.mode||''}</td><td>${r.detected??''}</td><td>${r.ground_truth??''}</td><td>${r.error??''}</td><td>${r.count_accuracy_pct??''}</td></tr>`).join('');
     $('testOut').innerHTML=`<table class="rep"><tr><th>场景</th><th>模式</th><th>检测</th><th>gt</th><th>误差</th><th>准确率</th></tr>${rows}</table>`;};
 }
 

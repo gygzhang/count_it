@@ -16,6 +16,7 @@ import json
 import os
 import re
 import shutil
+import threading
 import time
 
 import cv2
@@ -266,8 +267,9 @@ AUTO_TRK_KEYS = ("max_dist", "global_vx", "global_vy", "ordered_match",
 _FRAMES = {}   # frame_key -> {"dir", "w", "h", "src_fps", "n"}
 _DETS = {}     # det_key -> {"dets_seq", "mask_dir", "method", "band", "diag",
                #             "auto_trk", "det_ms", "w", "h"}
-_MAX_FRAME_SETS = 6
-_MAX_DET_SETS = 20
+_MAX_FRAME_SETS = 12
+_MAX_DET_SETS = 40
+_LOCK = threading.RLock()   # serialize cache population/eviction (Flask threaded=True)
 
 
 def _hash(*parts):
@@ -294,14 +296,30 @@ def _det_sig(P):
                              for k in sorted(DET_KEYS)}, default=str))
 
 
-def _lru(cache, cap):
-    # dict preserves insertion order; evict oldest entries and clean their dirs
-    while len(cache) > cap:
-        key = next(iter(cache))
-        entry = cache.pop(key)
-        for d in (entry.get("dir"), entry.get("mask_dir")):
-            if d and os.path.isdir(d):
-                shutil.rmtree(d, ignore_errors=True)
+def _drop_dets_for(fkey):
+    """Evict detection entries built on a frame set, cleaning their masks."""
+    for dk in [k for k, e in _DETS.items() if e.get("fkey") == fkey]:
+        entry = _DETS.pop(dk)
+        if entry.get("mask_dir") and os.path.isdir(entry["mask_dir"]):
+            shutil.rmtree(entry["mask_dir"], ignore_errors=True)
+
+
+def _lru_frames():
+    # Evict oldest frame sets AND their dependent detections (keep them coherent).
+    while len(_FRAMES) > _MAX_FRAME_SETS:
+        key = next(iter(_FRAMES))
+        entry = _FRAMES.pop(key)
+        _drop_dets_for(key)
+        if entry.get("dir") and os.path.isdir(entry["dir"]):
+            shutil.rmtree(entry["dir"], ignore_errors=True)
+
+
+def _lru_dets():
+    while len(_DETS) > _MAX_DET_SETS:
+        key = next(iter(_DETS))
+        entry = _DETS.pop(key)
+        if entry.get("mask_dir") and os.path.isdir(entry["mask_dir"]):
+            shutil.rmtree(entry["mask_dir"], ignore_errors=True)
 
 
 def _paste_mask(mask, w, h, roi):
@@ -314,52 +332,58 @@ def _paste_mask(mask, w, h, roi):
 
 
 def ensure_frames(video, scale, fps, max_frames, cache_root):
-    """Decode + dump processed frames once; returns (info, frames_or_None)."""
-    key = _hash(os.path.realpath(video), os.path.getmtime(video), scale, max_frames)
-    if key in _FRAMES:
-        return key, _FRAMES[key], None
-    frames, w, h, src_fps = _decode(video, scale, fps, max_frames)
-    fdir = os.path.join(cache_root, "frames", key)
-    os.makedirs(fdir, exist_ok=True)
-    for i, f in enumerate(frames):
-        cv2.imwrite(os.path.join(fdir, f"frame_{i:06d}.jpg"), f,
-                    [cv2.IMWRITE_JPEG_QUALITY, 80])
-    _FRAMES[key] = {"dir": fdir, "w": w, "h": h, "src_fps": src_fps, "n": len(frames)}
-    _lru(_FRAMES, _MAX_FRAME_SETS)
-    return key, _FRAMES[key], frames
+    """Decode + dump processed frames once; returns (key, info, frames_or_None).
+
+    Key is scoped to path+mtime+scale+max_frames+fps+cache_root so different
+    fps (image folders), cache roots, or edited files never collide."""
+    key = _hash(os.path.realpath(video), os.path.getmtime(video), scale,
+                max_frames, round(float(fps), 3), os.path.realpath(cache_root))
+    with _LOCK:
+        if key in _FRAMES:
+            return key, _FRAMES[key], None
+        frames, w, h, src_fps = _decode(video, scale, fps, max_frames)
+        fdir = os.path.join(cache_root, "frames", key)
+        os.makedirs(fdir, exist_ok=True)
+        for i, f in enumerate(frames):
+            cv2.imwrite(os.path.join(fdir, f"frame_{i:06d}.jpg"), f,
+                        [cv2.IMWRITE_JPEG_QUALITY, 80])
+        _FRAMES[key] = {"dir": fdir, "w": w, "h": h, "src_fps": src_fps, "n": len(frames)}
+        _lru_frames()
+        return key, _FRAMES[key], frames
 
 
 def ensure_detection(fkey, finfo, frames, video, scale, fps, max_frames, P, cache_root):
     """Resolve method + optional auto-adapt + detect + dump masks (cached)."""
     w, h, src_fps = finfo["w"], finfo["h"], finfo["src_fps"]
-    dkey = _hash(fkey, _det_sig(P))
-    if dkey in _DETS:
+    dkey = _hash(fkey, _det_sig(P))          # fkey already scopes fps/cache_root
+    with _LOCK:
+        if dkey in _DETS:
+            return dkey, _DETS[dkey]
+        if frames is None:
+            frames, w, h, src_fps = _decode(video, scale, fps, max_frames)
+        method, ref = resolve_method(P, frames, w, h)   # may write thresh band into P
+        band = [int(P["thresh_lo"]), int(P["thresh_hi"])] if method == "thresh" else None
+        diag, Pdet = {}, P
+        if P.get("auto_adapt"):
+            Pdet, diag = auto_adapt_params(P, frames, method, w, h, ref, fps=src_fps)
+        auto_trk = {k: Pdet[k] for k in AUTO_TRK_KEYS if k in Pdet} if P.get("auto_adapt") else {}
+        det = Detector(Pdet, method, w, h, ref)
+        mask_dir = os.path.join(cache_root, "masks", dkey)
+        os.makedirs(mask_dir, exist_ok=True)
+        dets_seq, det_ms = [], []
+        for i, f in enumerate(frames):
+            t0 = time.perf_counter()
+            dets = det.detect(f)
+            det_ms.append((time.perf_counter() - t0) * 1000.0)
+            dets_seq.append(dets)
+            cv2.imwrite(os.path.join(mask_dir, f"frame_{i:06d}.jpg"),
+                        _paste_mask(det.last_mask, w, h, det.roi),
+                        [cv2.IMWRITE_JPEG_QUALITY, 70])
+        _DETS[dkey] = {"dets_seq": dets_seq, "mask_dir": mask_dir, "fkey": fkey,
+                       "method": method, "band": band, "diag": diag,
+                       "auto_trk": auto_trk, "det_ms": det_ms, "w": w, "h": h}
+        _lru_dets()
         return dkey, _DETS[dkey]
-    if frames is None:
-        frames, w, h, src_fps = _decode(video, scale, fps, max_frames)
-    method, ref = resolve_method(P, frames, w, h)   # may write thresh band into P
-    band = [int(P["thresh_lo"]), int(P["thresh_hi"])] if method == "thresh" else None
-    diag, Pdet = {}, P
-    if P.get("auto_adapt"):
-        Pdet, diag = auto_adapt_params(P, frames, method, w, h, ref, fps=src_fps)
-    auto_trk = {k: Pdet[k] for k in AUTO_TRK_KEYS if k in Pdet} if P.get("auto_adapt") else {}
-    det = Detector(Pdet, method, w, h, ref)
-    mask_dir = os.path.join(cache_root, "masks", dkey)
-    os.makedirs(mask_dir, exist_ok=True)
-    dets_seq, det_ms = [], []
-    for i, f in enumerate(frames):
-        t0 = time.perf_counter()
-        dets = det.detect(f)
-        det_ms.append((time.perf_counter() - t0) * 1000.0)
-        dets_seq.append(dets)
-        cv2.imwrite(os.path.join(mask_dir, f"frame_{i:06d}.jpg"),
-                    _paste_mask(det.last_mask, w, h, det.roi),
-                    [cv2.IMWRITE_JPEG_QUALITY, 70])
-    _DETS[dkey] = {"dets_seq": dets_seq, "mask_dir": mask_dir, "method": method,
-                   "band": band, "diag": diag, "auto_trk": auto_trk,
-                   "det_ms": det_ms, "w": w, "h": h}
-    _lru(_DETS, _MAX_DET_SETS)
-    return dkey, _DETS[dkey]
 
 
 def _track_frames(dets_seq, P, w, h, method):

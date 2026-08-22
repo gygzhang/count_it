@@ -105,3 +105,13 @@ def test_otsu_counts_dark_object_crossing(tmp_path):
     from count_cv import count_source
     count = count_source(_dark_object_folder(tmp_path), params={"method": "otsu"}, fps=30.0)
     assert count == 1
+
+
+def test_merge_close_preserves_multiplicity():
+    from count_cv import Detector
+    det = Detector({**DEFAULT_PARAMS, "merge_dist": 30.0}, "thresh", 200, 120)
+    # Two near detections; one carries multiplicity 2 (unsplittable pair).
+    dets = [(50, 60, 40, 50, 20, 20, 2), (60, 62, 50, 52, 20, 20, 1)]
+    merged = det._merge_close(dets)
+    assert len(merged) == 1
+    assert merged[0][6] == 3          # 2 + 1 summed, not reset to 1

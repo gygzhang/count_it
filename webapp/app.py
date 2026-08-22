@@ -12,6 +12,7 @@ Run:  python3 webapp/app.py   ->  http://127.0.0.1:5000
 import glob
 import json
 import os
+import re
 import subprocess
 import sys
 import uuid
@@ -48,9 +49,11 @@ def coerce_params(raw):
     """Cast web JSON values to the types expected by DEFAULT_PARAMS."""
     out = {}
     for key, val in (raw or {}).items():
-        if key not in DEFAULT_PARAMS or val is None or val == "":
-            if key == "roi" and val:
+        if key == "roi":
+            if val:
                 out["roi"] = [int(v) for v in str(val).split(",")][:4]
+            continue
+        if key not in DEFAULT_PARAMS or val is None or val == "":
             continue
         default = DEFAULT_PARAMS[key]
         if isinstance(default, bool):
@@ -62,6 +65,18 @@ def coerce_params(raw):
         else:
             out[key] = val
     return out
+
+
+def _max_frames(body):
+    """Clamp max_frames: absent/invalid -> safety cap; explicit <=0 -> 0 (all)."""
+    raw = body.get("max_frames")
+    if raw is None or raw == "":
+        return MAX_FRAMES_CAP
+    try:
+        v = int(raw)
+    except (TypeError, ValueError):
+        return MAX_FRAMES_CAP
+    return 0 if v <= 0 else min(v, MAX_FRAMES_CAP)
 
 
 def _valid_video(video):
@@ -146,7 +161,7 @@ def run():
     if not _valid_video(video):
         return jsonify({"error": "视频路径无效或不可访问"}), 400
     params = coerce_params(body.get("params"))
-    max_frames = min(int(body.get("max_frames") or MAX_FRAMES_CAP), MAX_FRAMES_CAP)
+    max_frames = _max_frames(body)
     try:
         result = annotate.run_cached(video, params, float(body.get("fps") or 30.0),
                                      max_frames, CACHE_ROOT)
@@ -173,7 +188,7 @@ def batch():
     if not videos:
         return jsonify({"error": "没有有效视频"}), 400
     params = coerce_params(body.get("params"))
-    max_frames = min(int(body.get("max_frames") or MAX_FRAMES_CAP), MAX_FRAMES_CAP)
+    max_frames = _max_frames(body)
     rows = annotate.batch_run(videos, params, 30.0, max_frames, CACHE_ROOT)
     return jsonify({"rows": rows})
 
@@ -193,7 +208,7 @@ def grid():
         grid_spec[k] = [coerce_params({k: v})[k] for v in vals if coerce_params({k: v})]
     if not grid_spec:
         return jsonify({"error": "网格为空或参数名无效"}), 400
-    max_frames = min(int(body.get("max_frames") or MAX_FRAMES_CAP), MAX_FRAMES_CAP)
+    max_frames = _max_frames(body)
     try:
         out = annotate.grid_search(video, base, grid_spec, 30.0, max_frames, CACHE_ROOT)
     except Exception as exc:   # noqa: BLE001
@@ -215,12 +230,15 @@ def autoparams():
 
 @app.route("/api/pytest", methods=["POST"])
 def run_pytest():
-    proc = subprocess.run([sys.executable, "-m", "pytest", "-q"], cwd=REPO,
-                          capture_output=True, text=True, timeout=180)
+    try:
+        proc = subprocess.run([sys.executable, "-m", "pytest", "-q"], cwd=REPO,
+                              capture_output=True, text=True, timeout=180)
+    except subprocess.TimeoutExpired:
+        return jsonify({"passed": 0, "failed": 0, "ok": False,
+                        "output": "pytest 超时(>180s)"})
     tail = (proc.stdout + proc.stderr).strip().splitlines()[-12:]
     passed = failed = 0
     for line in tail:
-        import re
         mp = re.search(r"(\d+) passed", line)
         mf = re.search(r"(\d+) failed", line)
         if mp:
@@ -239,9 +257,15 @@ def run_validate():
         profile = "smoke"
     results = os.path.join(REPO, "validation_scenarios", "results.json")
     if body.get("run"):
-        subprocess.run([sys.executable, "validate_scenarios.py", "--profile", profile,
-                        "--mode", "auto", "--reuse"], cwd=REPO,
-                       capture_output=True, text=True, timeout=600)
+        try:
+            proc = subprocess.run([sys.executable, "validate_scenarios.py", "--profile",
+                                   profile, "--mode", "auto", "--reuse"], cwd=REPO,
+                                  capture_output=True, text=True, timeout=600)
+        except subprocess.TimeoutExpired:
+            return jsonify({"error": "验证运行超时(>600s)"}), 504
+        if proc.returncode != 0:
+            return jsonify({"error": "验证运行失败",
+                            "output": (proc.stdout + proc.stderr)[-800:]}), 500
     if not os.path.isfile(results):
         return jsonify({"error": "尚无验证报告，请先运行"}), 404
     with open(results, encoding="utf-8") as fh:
